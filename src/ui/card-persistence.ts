@@ -11,7 +11,10 @@ export interface OpenAIWidgetStateBridge {
   toolOutput?: unknown;
   toolResponseMetadata?: unknown;
   widgetState?: unknown;
-  setWidgetState?: (state: unknown) => void;
+  // Kept for host capability diagnostics only. DevSpace deliberately treats
+  // ChatGPT widget state as read-only: authoritative card persistence lives in
+  // the server-side card store, avoiding host-side widget_state write races.
+  setWidgetState?: (state: unknown) => Promise<void> | void;
 }
 
 export interface OpenAICardReference {
