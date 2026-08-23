@@ -24,7 +24,6 @@ import {
   cardInvocationFromHostContext,
   cardReferenceFromOpenAIHost,
   persistedCardFromOpenAIHost,
-  widgetStateWithPersistedCard,
   type OpenAIWidgetStateBridge,
 } from "./card-persistence.js";
 import {
@@ -83,7 +82,7 @@ if (!maybeAppRoot) {
 const appRoot = maybeAppRoot;
 
 const CARD_PROBE_PREFIX = "[DevSpace card-probe]";
-const CARD_PROBE_BUILD = "card-race-v3";
+const CARD_PROBE_BUILD = "card-race-v4";
 
 void boot();
 
@@ -139,7 +138,6 @@ async function boot(): Promise<void> {
     const nextCard = { ...structured, tool };
     card = nextCard;
     cardOrigin = "tool-result";
-    persistCard(nextCard);
     expanded = isInitiallyExpandedCard(nextCard);
     reviewFilesExpanded = false;
     openWorkspaceInstructionKey = null;
@@ -398,7 +396,6 @@ function restoreStoredCard(
       openWorkspaceInstructionKey = null;
       showAvailableWorkspaceInstructions = false;
       errorMessage = null;
-      persistCard(restored);
       logCardProbe("store-restore-hit", {
         trigger,
         tool: restored.tool,
@@ -461,33 +458,6 @@ function clearCardForRestore(): void {
   openWorkspaceInstructionKey = null;
   showAvailableWorkspaceInstructions = false;
   errorMessage = null;
-}
-
-function persistCard(nextCard: ToolResultCard): void {
-  const bridge = openAIWidgetBridge();
-  if (typeof bridge?.setWidgetState !== "function") {
-    logCardProbe("host-persist-skip", {
-      tool: nextCard.tool,
-      cardId: nextCard.cardId,
-    });
-    return;
-  }
-
-  try {
-    bridge.setWidgetState(widgetStateWithPersistedCard(bridge.widgetState, nextCard));
-    logCardProbe("host-persist-called", {
-      tool: nextCard.tool,
-      cardId: nextCard.cardId,
-    });
-  } catch (persistError) {
-    logCardProbe("host-persist-failed", {
-      tool: nextCard.tool,
-      cardId: nextCard.cardId,
-      error: persistError instanceof Error ? persistError.message : String(persistError),
-    });
-    // ChatGPT widget persistence is an optional host extension. A host-side
-    // failure must never prevent the portable MCP Apps card from rendering.
-  }
 }
 
 function probeRecord(value: unknown): Record<string, unknown> | undefined {
