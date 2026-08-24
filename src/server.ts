@@ -134,6 +134,7 @@ interface ToolDefinitionMeta extends Record<string, unknown> {
     resourceUri: string;
     visibility: ["model"];
   };
+  "openai/outputTemplate": string;
 }
 
 type EmptyToolDefinitionMeta = Record<string, unknown> & {
@@ -167,6 +168,13 @@ function toolWidgetDescriptorMeta(
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
+      // ChatGPT Web currently exposes the MCP Apps resource URI but may route
+      // the iframe through a host bridge that is missing optional Apps host
+      // methods such as notifyMcpAppsHostContext/setWidgetView. Keep the
+      // legacy OpenAI template pointer as a compatibility alias to the exact
+      // same v2 resource so ChatGPT can select its fully-supported bridge,
+      // while standards-compliant hosts continue using ui.resourceUri.
+      "openai/outputTemplate": WORKSPACE_APP_URI,
     },
   };
 }
