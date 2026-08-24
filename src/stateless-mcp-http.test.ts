@@ -107,7 +107,7 @@ test("stateless MCP keeps resources readable after more than 32 fresh client ini
     assert.equal(resource.status, 200);
     assert.equal(resource.headers.get("mcp-session-id"), null);
     const body = await resource.text();
-    assert.match(body, /ui:\/\/devspace\/workspace-app\/v1\.html/);
+    assert.match(body, /ui:\/\/devspace\/workspace-app\/v2\.html/);
     assert.match(body, /text\/html/);
   }
 });
