@@ -82,7 +82,7 @@ if (!maybeAppRoot) {
 const appRoot = maybeAppRoot;
 
 const CARD_PROBE_PREFIX = "[DevSpace card-probe]";
-const CARD_PROBE_BUILD = "card-race-v4";
+const CARD_PROBE_BUILD = "card-race-v5";
 
 void boot();
 
@@ -91,7 +91,7 @@ async function boot(): Promise<void> {
   render();
 
   app = new App(
-    { name: "devspace-tool-cards", version: "0.5.0-card-store-probe" },
+    { name: "devspace-tool-cards", version: "0.6.0-mcp-apps-only" },
     {},
   );
 

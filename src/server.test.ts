@@ -22,7 +22,7 @@ test("workspace app resource declares its dedicated public origin", async (t) =>
   const context = await fixture(t);
   const listed = await context.client.listResources();
   const resource = listed.resources.find((entry) =>
-    entry.uri === "ui://devspace/workspace-app/v1.html"
+    entry.uri === "ui://devspace/workspace-app/v2.html"
   );
   assert.ok(resource);
 
@@ -39,17 +39,17 @@ test("workspace app resource declares its dedicated public origin", async (t) =>
   assert.deepEqual(ui?.csp?.connectDomains, [origin]);
 });
 
-test("widget tools expose the ChatGPT outputTemplate compatibility alias", async (t) => {
+test("widget tools use the MCP Apps resource URI without the legacy ChatGPT alias", async (t) => {
   const context = await fixture(t);
   const listed = await context.client.listTools();
   const openWorkspace = listed.tools.find((tool) => tool.name === "open_workspace");
   assert.ok(openWorkspace);
 
   const meta = openWorkspace._meta as Record<string, unknown> | undefined;
-  assert.equal(meta?.["openai/outputTemplate"], "ui://devspace/workspace-app/v1.html");
-  assert.equal(meta?.["ui/resourceUri"], "ui://devspace/workspace-app/v1.html");
+  assert.equal(meta?.["openai/outputTemplate"], undefined);
+  assert.equal(meta?.["ui/resourceUri"], "ui://devspace/workspace-app/v2.html");
   assert.deepEqual(meta?.ui, {
-    resourceUri: "ui://devspace/workspace-app/v1.html",
+    resourceUri: "ui://devspace/workspace-app/v2.html",
     visibility: ["model"],
   });
 });
