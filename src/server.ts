@@ -64,7 +64,7 @@ import {
 } from "./local-agent-availability.js";
 
 const PROCESS_HANDOFF_MS = 2_000;
-const WORKSPACE_APP_URI = "ui://devspace/workspace-app/v1.html";
+const WORKSPACE_APP_URI = "ui://devspace/workspace-app/v2.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -134,7 +134,6 @@ interface ToolDefinitionMeta extends Record<string, unknown> {
     resourceUri: string;
     visibility: ["model"];
   };
-  "openai/outputTemplate": string;
 }
 
 type EmptyToolDefinitionMeta = Record<string, unknown> & {
@@ -168,7 +167,6 @@ function toolWidgetDescriptorMeta(
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
-      "openai/outputTemplate": WORKSPACE_APP_URI,
     },
   };
 }

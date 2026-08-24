@@ -12,7 +12,7 @@ import { SqliteOAuthStore } from "./oauth-store.js";
 import { createServer } from "./server.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
-const WORKSPACE_APP_URI = "ui://devspace/workspace-app/v1.html";
+const WORKSPACE_APP_URI = "ui://devspace/workspace-app/v2.html";
 
 test("stateless MCP keeps resources readable after more than 32 fresh client initializations", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-stateless-http-test-"));
@@ -107,7 +107,7 @@ test("stateless MCP keeps resources readable after more than 32 fresh client ini
     assert.equal(resource.status, 200);
     assert.equal(resource.headers.get("mcp-session-id"), null);
     const body = await resource.text();
-    assert.match(body, /ui:\/\/devspace\/workspace-app\/v1\.html/);
+    assert.match(body, /ui:\/\/devspace\/workspace-app\/v2\.html/);
     assert.match(body, /text\/html/);
   }
 });
