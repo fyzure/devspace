@@ -31,20 +31,24 @@ import {
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { assertAllowedPath } from "./roots.js";
+import {
+  isSubagentProviderEnabled,
+  type SubagentsConfig,
+} from "./local-agent-config.js";
 
 export interface StartLocalAgentInput {
   target: string;
   prompt: string;
   workspaceRoot: string;
-  workspaceId: string;
+  workspaceId?: string;
   model?: string;
-  thinking?: string;
+  effort?: string;
   writeMode?: LocalAgentWriteMode;
 }
 
 export interface RunOverrides {
   model?: string;
-  thinking?: string;
+  effort?: string;
   writeMode?: LocalAgentWriteMode;
 }
 
@@ -60,6 +64,7 @@ export interface LocalAgentManagerOptions {
   agentDir?: string;
   allowedRoots?: readonly string[];
   logger?: LocalAgentManagerLogger;
+  subagents: SubagentsConfig;
 }
 
 export type AgentStartError = AgentTargetError | AgentScopeError | AgentConflictError | AgentStoreError;
@@ -80,6 +85,7 @@ export class LocalAgentManager {
   private readonly agentDir?: string;
   private readonly allowedRoots?: readonly string[];
   private readonly logger?: LocalAgentManagerLogger;
+  private readonly subagents: SubagentsConfig;
   private readonly activeTurns = new Map<string, Promise<void>>();
   private accepting = true;
   private closePromise?: Promise<void>;
@@ -92,6 +98,7 @@ export class LocalAgentManager {
     this.agentDir = options.agentDir;
     this.allowedRoots = options.allowedRoots;
     this.logger = options.logger;
+    this.subagents = options.subagents;
   }
 
   reconcileActiveRuns(message?: string): BetterResult<number, AgentStoreError> {
@@ -102,9 +109,19 @@ export class LocalAgentManager {
     const manager = this;
     return Result.gen(async function* () {
       yield* manager.acceptingResult("start");
-      const workspaceRoot = yield* manager.authorizeWorkspace(input.workspaceRoot, "start");
+      const workspaceRoot = yield* manager.authorizeWorkspace(
+        input.workspaceRoot,
+        input.workspaceId,
+        "start",
+      );
       const profiles = yield* Result.await(manager.loadProfilesResult(workspaceRoot, input.target));
-      const target = resolveLocalAgentTarget(input.target, profiles, input.model, input.thinking);
+      const target = resolveLocalAgentTarget(
+        input.target,
+        profiles,
+        input.model,
+        input.effort,
+        manager.subagents.providers,
+      );
       if (!target) {
         return Result.err(new AgentTargetError({
           code: "UNKNOWN_TARGET",
@@ -122,6 +139,7 @@ export class LocalAgentManager {
           message: `Subagent profile is disabled: ${target.name}.`,
         }));
       }
+      yield* manager.providerEnabledResult(target.provider, target.name, "start");
       yield* manager.driverResult(target.provider, "start");
       const record = yield* manager.store.createResult({
         workspaceId: input.workspaceId,
@@ -129,13 +147,13 @@ export class LocalAgentManager {
         profileName: target.name,
         provider: target.provider,
         model: target.model,
-        thinking: target.thinking,
+        effort: target.effort,
       });
       return manager.begin(record, input.prompt, {
         model: target.model,
-        thinking: target.thinking,
+        effort: target.effort,
         writeMode: input.writeMode,
-      });
+      }, input.workspaceId);
     });
   }
 
@@ -153,8 +171,9 @@ export class LocalAgentManager {
       yield* manager.agentWorkspaceResult(record, scope, "continue");
       const profiles = yield* Result.await(manager.loadProfilesResult(record.workspaceRoot, record.profileName));
       yield* manager.profileForRecordResult(record, profiles);
+      yield* manager.providerEnabledResult(record.provider, record.profileName, "continue");
       yield* manager.driverResult(record.provider, "continue", agentId);
-      return manager.begin(record, prompt, overrides);
+      return manager.begin(record, prompt, overrides, scope.workspaceId);
     });
   }
 
@@ -172,7 +191,7 @@ export class LocalAgentManager {
   }
 
   list(scope: LocalAgentWorkspaceScope): BetterResult<LocalAgentRecord[], AgentListError> {
-    return this.authorizeWorkspace(scope.workspaceRoot, "list").andThen((workspaceRoot) => (
+    return this.authorizeWorkspace(scope.workspaceRoot, scope.workspaceId, "list").andThen((workspaceRoot) => (
       this.store.listResult({
         workspaceId: scope.workspaceId,
         workspaceRoot,
@@ -215,6 +234,7 @@ export class LocalAgentManager {
     record: LocalAgentRecord,
     prompt: string,
     overrides: RunOverrides,
+    workspaceId?: string,
   ): BetterResult<LocalAgentRecord, AgentConflictError | AgentStoreError> {
     if (this.activeTurns.has(record.id)) {
       return Result.err(new AgentConflictError({
@@ -229,7 +249,7 @@ export class LocalAgentManager {
     const updated = this.store.updateResult(record.id, {
       status: "running",
       model: overrides.model ?? record.model,
-      thinking: overrides.thinking ?? record.thinking,
+      effort: overrides.effort ?? record.effort,
       latestResponse: undefined,
       error: undefined,
       errorCode: undefined,
@@ -238,7 +258,9 @@ export class LocalAgentManager {
     if (updated.isErr()) return updated;
     // Defer invocation until after the tracking entry is visible. This keeps
     // cleanup correct even if runTurn later gains a synchronous completion path.
-    const turn = Promise.resolve().then(() => this.runTurn(updated.value, prompt, overrides));
+    const turn = Promise.resolve().then(() => (
+      this.runTurn(updated.value, prompt, overrides, workspaceId)
+    ));
     this.activeTurns.set(record.id, turn);
     void turn.catch(() => undefined);
     return updated;
@@ -248,6 +270,7 @@ export class LocalAgentManager {
     record: LocalAgentRecord,
     prompt: string,
     overrides: RunOverrides,
+    workspaceId?: string,
   ): Promise<void> {
     const startedAt = Date.now();
     this.log("info", "agent_run_started", {
@@ -256,7 +279,7 @@ export class LocalAgentManager {
       providerSessionIdPrefix: record.providerSessionId?.slice(0, 8),
     });
     try {
-      const authorized = this.authorizeWorkspace(record.workspaceRoot, "run");
+      const authorized = this.authorizeWorkspace(record.workspaceRoot, workspaceId, "run");
       if (authorized.isErr()) {
         this.persistRunError(record, authorized.error, startedAt);
         return;
@@ -292,7 +315,7 @@ export class LocalAgentManager {
         providerSessionId: record.providerSessionId,
         writeMode: input.value.writeMode,
         model: input.value.model,
-        thinking: input.value.thinking,
+        effort: input.value.effort,
         agentDir: this.agentDir,
       };
       const callbacks: LocalAgentRunCallbacks = {
@@ -401,9 +424,9 @@ export class LocalAgentManager {
       providerSessionId: record.providerSessionId,
       writeMode: overrides.writeMode ?? "allowed",
       model: record.model ?? profile?.model,
-      thinking: record.thinking ?? profile?.thinking,
+      effort: record.effort ?? profile?.effort,
       modelOverrideRequested: overrides.model !== undefined,
-      thinkingOverrideRequested: overrides.thinking !== undefined,
+      effortOverrideRequested: overrides.effort !== undefined,
     });
   }
 
@@ -462,6 +485,23 @@ export class LocalAgentManager {
     return Result.ok(driver);
   }
 
+  private providerEnabledResult(
+    provider: string,
+    target: string,
+    operation: string,
+  ): BetterResult<void, AgentTargetError> {
+    if (!isLocalAgentProvider(provider)) return Result.ok(undefined);
+    if (isSubagentProviderEnabled(this.subagents, provider)) return Result.ok(undefined);
+    return Result.err(new AgentTargetError({
+      code: "PROVIDER_DISABLED",
+      target,
+      provider,
+      operation,
+      retryable: false,
+      message: `Subagent provider is disabled: ${provider}.`,
+    }));
+  }
+
   private acceptingResult(
     operation: string,
     agentId?: string,
@@ -478,10 +518,11 @@ export class LocalAgentManager {
 
   private authorizeWorkspace(
     workspaceRoot: string,
+    workspaceId: string | undefined,
     operation: string,
   ): BetterResult<string, AgentScopeError> {
     const normalized = resolve(workspaceRoot);
-    if (!this.allowedRoots) return Result.ok(normalized);
+    if (!workspaceId || !this.allowedRoots) return Result.ok(normalized);
     try {
       return Result.ok(assertAllowedPath(normalized, [...this.allowedRoots]));
     } catch (cause) {
@@ -500,9 +541,10 @@ export class LocalAgentManager {
     scope: LocalAgentWorkspaceScope,
     operation: string,
   ): BetterResult<void, AgentScopeError> {
-    const workspaceRoot = this.authorizeWorkspace(scope.workspaceRoot, operation);
+    const workspaceRoot = this.authorizeWorkspace(scope.workspaceRoot, scope.workspaceId, operation);
     if (workspaceRoot.isErr()) return workspaceRoot;
-    if (workspaceRoot.value !== record.workspaceRoot || record.workspaceId !== scope.workspaceId) {
+    const idMismatch = scope.workspaceId !== undefined && record.workspaceId !== scope.workspaceId;
+    if (workspaceRoot.value !== record.workspaceRoot || idMismatch) {
       return Result.err(new AgentScopeError({
         code: "WORKSPACE_MISMATCH",
         agentId: record.id,

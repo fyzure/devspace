@@ -450,6 +450,7 @@ function displayProvider(provider: LocalAgentProvider): string {
     case "pi": return "Pi";
     case "cursor": return "Cursor";
     case "copilot": return "Copilot";
+    case "grok": return "Grok";
   }
 }
 

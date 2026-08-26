@@ -103,7 +103,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       workspaceRoot: "/tmp/project",
       writeMode: "read_only",
       model: "gpt-5.4",
-      thinking: "high",
+      effort: "high",
     }, { onSessionId: (id) => { callbackSessionId = id; } });
     assert.equal(firstResult.isOk(), true);
     if (firstResult.isErr()) throw firstResult.error;

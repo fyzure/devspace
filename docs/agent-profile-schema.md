@@ -27,7 +27,7 @@ name: reviewer
 description: Read-only reviewer for bugs, security risks, and missing tests.
 provider: codex
 model: gpt-5.4
-thinking: high
+effort: high
 disabled: false
 ---
 
@@ -73,6 +73,7 @@ provider: opencode
 provider: pi
 provider: cursor
 provider: copilot
+provider: grok
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
@@ -84,6 +85,7 @@ native integration:
 - `pi`: the installed Pi coding-agent SDK, one in-process session per DevSpace agent
 - `cursor`: ACP
 - `copilot`: ACP
+- `grok`: Grok Build ACP (`grok agent stdio`)
 
 Codex is resolved from the user's environment rather than bundled with
 DevSpace. Run `codex login` normally before using it; set `CODEX_COMMAND` when
@@ -100,16 +102,16 @@ model: gpt-5.4
 model: sonnet
 ```
 
-### `thinking`
+### `effort`
 
 Optional provider reasoning effort, thinking level, or model variant. If omitted,
 DevSpace lets the provider default apply. Values are provider-specific
 passthrough strings; DevSpace does not translate names between harnesses.
 
 ```yaml
-thinking: low
-thinking: high
-thinking: xhigh
+effort: low
+effort: high
+effort: xhigh
 ```
 
 DevSpace passes this through to providers that expose a matching control:
@@ -119,6 +121,7 @@ DevSpace passes this through to providers that expose a matching control:
 - `pi`: the AgentSession thinking-level control.
 - `opencode`: model variant.
 - `cursor` and `copilot`: ACP thought-level config when supported.
+- `grok`: `--reasoning-effort` on startup and xAI's ACP model metadata for resumed sessions.
 
 ### `disabled`
 
@@ -145,10 +148,11 @@ Recommended body content:
 The Subagent skill teaches only:
 
 ```bash
-devspace agents ls
-devspace agents run <profile-or-provider> "<prompt>"
-devspace agents continue <id> "<prompt>"
-devspace agents show <id>
+devspace agents ls --json
+devspace agents targets --json
+devspace agents run <profile-or-provider> "<prompt>" --json
+devspace agents continue <id> "<prompt>" --json
+devspace agents show <id> --json
 ```
 
 `open_workspace` exposes compact profile metadata:
@@ -159,12 +163,13 @@ devspace agents show <id>
   "description": "Read-only reviewer for bugs, security risks, and missing tests.",
   "provider": "codex",
   "model": "gpt-5.4",
-  "thinking": "high"
+  "effort": "high"
 }
 ```
 
-`devspace agents ls` lists existing subagent sessions for the current workspace;
-it does not list profile definitions.
+`devspace agents targets` lists usable providers and profile definitions for the
+current workspace. `devspace agents ls` lists existing subagent sessions; it does
+not list profile definitions.
 
 Use `devspace agents continue <id>` for a later turn. The logical agent ID is
 the `agt_...` value returned by `run` or `ls`; provider session IDs are not

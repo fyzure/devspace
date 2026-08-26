@@ -7,7 +7,7 @@ import {
   extractPiFinalResponse,
   extractPiProviderError,
   resolveAcpModelConfigUpdate,
-  resolveAcpThinkingConfigUpdate,
+  resolveAcpEffortConfigUpdate,
 } from "./local-agent-adapters.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
@@ -19,6 +19,7 @@ const providers: LocalAgentProvider[] = [
   "pi",
   "cursor",
   "copilot",
+  "grok",
 ];
 
 for (const provider of providers) {
@@ -109,7 +110,7 @@ assert.throws(
 );
 
 assert.deepEqual(
-  resolveAcpThinkingConfigUpdate({
+  resolveAcpEffortConfigUpdate({
     sessionId: "session_1",
     newSessionResponse: {
       configOptions: [
@@ -129,7 +130,7 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  resolveAcpThinkingConfigUpdate({
+  resolveAcpEffortConfigUpdate({
     sessionId: "session_2",
     newSessionResponse: {
       configOptions: [
@@ -155,7 +156,7 @@ assert.deepEqual(
 );
 
 assert.throws(
-  () => resolveAcpThinkingConfigUpdate({
+  () => resolveAcpEffortConfigUpdate({
     sessionId: "session_3",
     newSessionResponse: {
       configOptions: [
@@ -172,21 +173,21 @@ assert.throws(
 );
 
 assert.throws(
-  () => resolveAcpThinkingConfigUpdate(undefined, "high", "copilot"),
+  () => resolveAcpEffortConfigUpdate(undefined, "high", "copilot"),
   /session metadata/,
 );
 
 assert.throws(
-  () => resolveAcpThinkingConfigUpdate({ newSessionResponse: { configOptions: [] } }, "high", "copilot"),
+  () => resolveAcpEffortConfigUpdate({ newSessionResponse: { configOptions: [] } }, "high", "copilot"),
   /session id/,
 );
 
 assert.throws(
-  () => resolveAcpThinkingConfigUpdate({
+  () => resolveAcpEffortConfigUpdate({
     sessionId: "session_4",
     newSessionResponse: { configOptions: [] },
   }, "high", "copilot"),
-  /does not expose a thinking option/,
+  /does not expose a reasoning effort option/,
 );
 
 {
@@ -215,7 +216,7 @@ assert.equal(
       {
         info: { id: "msg_assistant", role: "assistant" },
         parts: [
-          { type: "reasoning", text: "thinking" },
+          { type: "reasoning", text: "effort" },
           { type: "tool", tool: "grep", input: { pattern: "secret" }, output: "src/foo.ts" },
           { type: "text", text: "Final OpenCode response." },
         ],
@@ -237,7 +238,7 @@ assert.equal(
         id: "msg_assistant",
         type: "assistant",
         content: [
-          { type: "reasoning", text: "thinking" },
+          { type: "reasoning", text: "effort" },
           { type: "tool", name: "grep", state: { status: "completed", result: "src/foo.ts" } },
           { type: "text", text: "Final OpenCode v2 response." },
         ],
@@ -255,7 +256,7 @@ assert.equal(
         role: "assistant",
         structured: { summary: "structured answer" },
       },
-      parts: [{ type: "reasoning", text: "thinking" }],
+      parts: [{ type: "reasoning", text: "effort" }],
     },
   }),
   '{"summary":"structured answer"}',
@@ -266,7 +267,7 @@ assert.equal(
     data: {
       info: { id: "msg_tool_only", role: "assistant" },
       parts: [
-        { type: "reasoning", text: "thinking" },
+        { type: "reasoning", text: "effort" },
         { type: "tool", tool: "bash", input: { command: "cat src/secret.ts" }, output: "secret" },
       ],
     },

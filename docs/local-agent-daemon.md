@@ -59,9 +59,12 @@ devspace agents daemon logs
 ```
 
 Agent commands accept `--json` when a machine-readable response is needed.
-Immediate failures are emitted as `{ ok: false, error: { code, message,
-retryable, ... } }`; successful `show`, `ls`, `run`, and `continue` output keeps
-the structured error fields on agent records when present.
+They emit one compact JSON value. `run` and `continue` return only the logical
+agent ID and status, `ls` returns session summaries, and `show` returns the
+response or structured failure for one agent. Internal workspace paths,
+provider session IDs, timestamps, and prior responses are not included in list
+or receipt output. Immediate failures are emitted as
+`{ error: { code, message, retryable, ... } }` with a non-zero exit code.
 Successful `daemon status` and `daemon stop` output the daemon status object,
 and successful `daemon logs` output is `{ "logs": "<text>" }`.
 

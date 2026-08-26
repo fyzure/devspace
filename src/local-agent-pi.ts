@@ -155,8 +155,8 @@ export class PiSessionRuntime implements LocalAgentRuntime {
       }
       await this.session.setModel(model as never);
     }
-    if (input.thinking) {
-      this.session.setThinkingLevel(input.thinking as never);
+    if (input.effort) {
+      this.session.setThinkingLevel(input.effort as never);
     }
   }
 }
@@ -183,7 +183,7 @@ export class PiLocalAgentDriver implements LocalAgentDriver {
           providerSessionId: context.providerSessionId,
           writeMode: context.writeMode,
           model: context.model,
-          thinking: context.thinking,
+          effort: context.effort,
         };
         const session = await this.factory(context, input);
         return new PiSessionRuntime(session);
@@ -237,7 +237,7 @@ async function defaultPiSessionFactory(
       sessionManager: sessionManager as never,
       resourceLoader,
       ...(model ? { model: model as never } : {}),
-      ...(input.thinking ? { thinkingLevel: input.thinking as never } : {}),
+      ...(input.effort ? { thinkingLevel: input.effort as never } : {}),
       // Keep the full built-in registry available so warm turns can narrow or
       // broaden active tools without recreating the session.
       tools: [...PI_FULL_ACCESS_TOOLS],

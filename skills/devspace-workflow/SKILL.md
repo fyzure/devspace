@@ -38,7 +38,7 @@ the isolated worktree is still the right target.
   skill directory.
 - Use the returned subagent profile catalog only when the user requests
   delegation, parallel agent work, a named agent, or a second opinion. Load the
-  `subagent-delegation` skill before invoking one.
+  `subagents` skill before invoking one.
 
 Instructions and skills are scoped inputs, not permission to broaden allowed
 roots, expose credentials, or perform unrelated work.

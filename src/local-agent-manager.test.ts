@@ -18,8 +18,10 @@ import type {
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
+import type { SubagentsConfig } from "./local-agent-config.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-agent-manager-test-"));
+const directRoot = await mkdtemp(join(tmpdir(), "devspace-direct-agent-manager-test-"));
 const stateDir = join(root, "state");
 const scope = { workspaceId: "ws_test", workspaceRoot: root };
 const profile: LocalAgentProfile = {
@@ -35,6 +37,13 @@ const disabledProfile: LocalAgentProfile = {
   name: "disabled-reviewer",
   filePath: join(root, "disabled-reviewer.md"),
   disabled: true,
+};
+const subagents: SubagentsConfig = {
+  enabled: true,
+  providers: [
+    { id: "codex", enabled: true, model: "gpt-default", effort: "medium" },
+    { id: "claude", enabled: true },
+  ],
 };
 
 class FakeRuntime implements LocalAgentRuntime {
@@ -120,6 +129,7 @@ const manager = new LocalAgentManager({
   pool: new LocalAgentRuntimePool(),
   loadProfiles: async () => [profile, disabledProfile],
   allowedRoots: [root],
+  subagents,
 });
 
 const defectStore = new LocalAgentStore(join(root, "defect-state"));
@@ -131,6 +141,7 @@ const defectManager = new LocalAgentManager({
     throw new TypeError("profile loader defect");
   },
   allowedRoots: [root],
+  subagents,
 });
 await assert.rejects(
   defectManager.start({
@@ -179,6 +190,15 @@ const unconfigured = await manager.start({
 assert.equal(unconfigured.isErr(), true);
 if (unconfigured.isErr()) assert.equal(unconfigured.error.code, "PROVIDER_NOT_CONFIGURED");
 
+const disabledProvider = await manager.start({
+  target: "pi",
+  prompt: "inspect",
+  workspaceId: scope.workspaceId,
+  workspaceRoot: root,
+});
+assert.equal(disabledProvider.isErr(), true);
+if (disabledProvider.isErr()) assert.equal(disabledProvider.error.code, "PROVIDER_DISABLED");
+
 const previouslyCreatedDisabled = store.create({
   workspaceId: scope.workspaceId,
   workspaceRoot: root,
@@ -210,6 +230,8 @@ const first = unwrap(await manager.start({
   workspaceRoot: root,
 }));
 assert.equal(first.status, "running");
+assert.equal(first.model, "gpt-default");
+assert.equal(first.effort, "medium");
 await waitFor(() => runtimes.get(first.id)?.inputs.length === 1);
 const conflict = await manager.continue(first.id, "another prompt", {}, scope);
 assert.equal(conflict.isErr(), true);
@@ -223,9 +245,14 @@ await waitFor(() => getRecord(first.id).status === "idle");
 assert.equal(getRecord(first.id).providerSessionId, "thread_test");
 assert.match(getRecord(first.id).latestResponse ?? "", /Task:\nhold/);
 
-const continued = unwrap(await manager.continue(first.id, "continue", {}, scope));
+const continued = unwrap(await manager.continue(first.id, "continue", {
+  model: "gpt-run",
+  effort: "high",
+}, scope));
 assert.equal(continued.status, "running");
 await waitFor(() => getRecord(first.id).status === "idle");
+assert.equal(getRecord(first.id).model, "gpt-run");
+assert.equal(getRecord(first.id).effort, "high");
 
 const second = unwrap(await manager.start({
   target: "reviewer",
@@ -278,6 +305,29 @@ const wrongWorkspaceId = await manager.continue(
 assert.equal(wrongWorkspaceId.isErr(), true);
 if (wrongWorkspaceId.isErr()) assert.equal(wrongWorkspaceId.error.code, "WORKSPACE_MISMATCH");
 
+const directOutside = unwrap(await manager.start({
+  target: "reviewer",
+  prompt: "direct outside allowed roots",
+  workspaceRoot: directRoot,
+}));
+await waitFor(() => unwrap(manager.get(directOutside.id, { workspaceRoot: directRoot })).status === "idle");
+assert.equal(directOutside.workspaceId, undefined);
+assert.deepEqual(unwrap(manager.list({ workspaceRoot: directRoot })).map((record) => record.id), [
+  directOutside.id,
+]);
+
+const direct = unwrap(await manager.start({
+  target: "reviewer",
+  prompt: "direct harness",
+  workspaceRoot: root,
+}));
+await waitFor(() => unwrap(manager.get(direct.id, { workspaceRoot: root })).status === "idle");
+assert.equal(direct.workspaceId, undefined);
+assert.equal(unwrap(manager.get(first.id, { workspaceRoot: root })).id, first.id);
+const directWrongId = manager.get(direct.id, { workspaceId: "ws_other", workspaceRoot: root });
+assert.equal(directWrongId.isErr(), true);
+if (directWrongId.isErr()) assert.equal(directWrongId.error.code, "WORKSPACE_MISMATCH");
+
 const defect = unwrap(await manager.start({
   target: "reviewer",
   prompt: "defect",
@@ -302,6 +352,7 @@ await closing;
 
 await manager.close();
 await rm(root, { recursive: true, force: true });
+await rm(directRoot, { recursive: true, force: true });
 
 function getRecord(id: string) {
   return unwrap(manager.get(id, scope));

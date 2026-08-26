@@ -66,26 +66,28 @@ Install the DevSpace CLI:
 npm install -g @waishnav/devspace
 ```
 
-Then initialize and start the server:
+Then initialize DevSpace:
 
 ```bash
 devspace init
-devspace serve
 ```
 
 Or run it without a global install:
 
 ```bash
 npx @waishnav/devspace init
-npx @waishnav/devspace serve
 ```
 
 During setup, DevSpace asks for:
 
-- the local project folders ChatGPT is allowed to open through DevSpace
-- the local port, usually `7676`
-- your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or
-  another reverse proxy
+- where you will use it: ChatGPT, Coding Agents, or both
+- which Coding Agents DevSpace may use
+
+If you select ChatGPT, setup also asks which local project folders it may open
+and for your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy,
+Tailscale Funnel, or another reverse proxy. A Coding Agents-only setup asks
+neither question: local commands use the current Git project, or the current
+directory outside a repository.
 
 Use the public origin without `/mcp` during setup:
 
@@ -94,6 +96,8 @@ https://your-tunnel-host.example.com
 ```
 
 You will configure your MCP client with the public `/mcp` URL after setup.
+Run `devspace serve` when using ChatGPT. For Coding Agents, setup prints a
+`skills` command and lets the Skills CLI handle installation.
 
 When the client connects, DevSpace opens an Owner password approval page. Enter
 the Owner password printed by `devspace init`. It is also stored in:

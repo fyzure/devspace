@@ -7,21 +7,45 @@ import * as prompts from "@clack/prompts";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
+import { resolveCliWorkspaceContext } from "./cli-workspace.js";
+import { resolveSubagentsConfig } from "./local-agent-config.js";
 import {
-  formatLocalAgentProviderAvailabilitySummary,
+  getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
+import {
+  buildLocalAgentCatalog,
+  buildLocalAgentProviderStatuses,
+  formatLocalAgentProviderStatusSummary,
+} from "./local-agent-catalog.js";
+import { loadLocalAgentProfiles } from "./local-agent-profiles.js";
+import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import {
   parseLocalAgentContinueArgs,
   parseLocalAgentRunArgs,
 } from "./local-agent-targets.js";
 import { createLocalAgentClient } from "./local-agent-client.js";
 import { toAgentErrorPayload, type LocalAgentError } from "./local-agent-errors.js";
-import type { LocalAgentRecord } from "./local-agent-store.js";
 import {
-  ensureDevspaceDefaultSkills,
+  formatAgentObservation,
+  formatAgentReceipt,
+  formatAgentSummary,
+  formatAgentTargetCatalog,
+  presentAgentObservation,
+  presentAgentReceipt,
+  presentAgentSummary,
+  presentAgentTargetCatalog,
+} from "./local-agent-presentation.js";
+import {
+  type OnboardingDestination,
+  SUBAGENT_SKILL_INSTALL_COMMAND,
+  resolveOnboardingUsage,
+  updateOnboardingSubagentsConfig,
+  usesChatGpt,
+  usesCodingAgents,
+} from "./onboarding.js";
+import {
   generateOwnerToken,
   loadDevspaceFiles,
-  resolveSubagentsFlag,
   writeDevspaceAuth,
   writeDevspaceConfig,
   type DevspaceUserConfig,
@@ -86,7 +110,7 @@ async function ensureConfigured(): Promise<void> {
         "Run:",
         "  devspace init",
         "",
-        "Or provide DEVSPACE_OAUTH_OWNER_TOKEN and DEVSPACE_ALLOWED_ROOTS.",
+        "Or provide DEVSPACE_OAUTH_OWNER_TOKEN.",
       ].join("\n"),
     );
   }
@@ -105,78 +129,140 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
   try {
     prompts.intro("DevSpace setup");
 
-    const defaultRoots = files.config.allowedRoots?.join(", ") || process.cwd();
-    const rootsAnswer = await textPrompt({
-      message: `Where are your projects located? Press Enter to use ${defaultRoots}`,
-      placeholder: defaultRoots,
-      defaultValue: defaultRoots,
-      validate: (value) => value?.trim() ? undefined : "Enter at least one project root.",
+    const destinationAnswer = await prompts.multiselect({
+      message: "Where will you use DevSpace?",
+      options: [
+        {
+          value: "chatgpt",
+          label: "ChatGPT",
+          hint: "Connect ChatGPT to projects on this computer.",
+        },
+        {
+          value: "coding-agents",
+          label: "Coding Agents",
+          hint: "Use DevSpace from Codex, Claude Code, OpenCode, Pi, and similar tools.",
+        },
+      ],
+      initialValues: files.config.publicBaseUrl ? ["chatgpt"] : ["coding-agents"],
+      required: true,
     });
-    const allowedRoots = rootsAnswer
-      .split(",")
-      .map((root) => resolve(expandHomePath(root.trim())))
-      .filter(Boolean);
+    if (prompts.isCancel(destinationAnswer)) throw new SetupCancelledError();
+    const usage = resolveOnboardingUsage(destinationAnswer as OnboardingDestination[]);
+    const useChatGpt = usesChatGpt(usage);
+    const useCodingAgents = usesCodingAgents(usage);
 
-    const defaultPort = String(files.config.port ?? 7676);
-    const portAnswer = await textPrompt({
-      message: `Which local port should DevSpace use? Press Enter to use ${defaultPort}`,
-      placeholder: defaultPort,
-      defaultValue: defaultPort,
-      validate: validatePort,
+    let allowedRoots: string[] | undefined;
+    if (useChatGpt) {
+      const defaultRoots = files.config.allowedRoots?.join(", ") || process.cwd();
+      const rootsAnswer = await textPrompt({
+        message: `Which project folders can DevSpace access? Press Enter to use ${defaultRoots}`,
+        placeholder: defaultRoots,
+        defaultValue: defaultRoots,
+        validate: (value) => value?.trim() ? undefined : "Enter at least one project root.",
+      });
+      allowedRoots = rootsAnswer
+        .split(",")
+        .map((root) => resolve(expandHomePath(root.trim())))
+        .filter(Boolean);
+    }
+
+    const port = isValidPort(files.config.port) ? files.config.port : 7676;
+
+    let publicBaseUrl: string | null = null;
+    if (useChatGpt) {
+      prompts.note(
+        [
+          `Point your HTTPS tunnel or reverse proxy to http://127.0.0.1:${port}.`,
+          "Paste its public URL below.",
+          "",
+          "Example: https://your-tunnel-host.example.com",
+        ].join("\n"),
+        "Connect ChatGPT",
+      );
+      publicBaseUrl = normalizePublicBaseUrl(await textPrompt({
+        message: files.config.publicBaseUrl
+          ? `What public URL will ChatGPT connect to? Press Enter to keep ${files.config.publicBaseUrl}`
+          : "What public URL will ChatGPT connect to?",
+        placeholder: files.config.publicBaseUrl ?? "https://your-tunnel-host.example.com",
+        defaultValue: files.config.publicBaseUrl ?? "",
+        validate: validateRequiredPublicBaseUrl,
+      }));
+    }
+
+    const currentSubagents = resolveSubagentsConfig(files.config.subagents, {});
+    const availability = getLocalAgentProviderAvailabilitySnapshot();
+    const configuredProviders = currentSubagents.providers
+      .filter((provider) => provider.enabled)
+      .map((provider) => provider.id);
+    const initialValues = configuredProviders.length > 0
+      ? configuredProviders
+      : availability
+          .filter((provider) => provider.available)
+          .map((provider) => provider.name);
+    const providerAnswer = await prompts.multiselect({
+      message: "Which Coding Agents should be available?",
+      options: availability.map((provider) => ({
+        value: provider.name,
+        label: provider.name,
+        hint: provider.available
+          ? provider.note ?? "available"
+          : `unavailable: ${provider.reason ?? "provider preflight failed"}`,
+      })),
+      initialValues,
+      required: true,
     });
-    const port = Number(portAnswer);
-
-    prompts.note(
-      [
-        "DevSpace needs a public base URL so ChatGPT or Claude can reach this MCP server.",
-        "Create a tunnel or reverse proxy with Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or your own HTTPS proxy.",
-        "Paste the public origin here, without /mcp.",
-        "",
-        "Example: https://your-tunnel-host.example.com",
-      ].join("\n"),
-      "Public URL required",
+    if (prompts.isCancel(providerAnswer)) throw new SetupCancelledError();
+    const selectedProviders = providerAnswer as LocalAgentProvider[];
+    const subagents = updateOnboardingSubagentsConfig(
+      currentSubagents,
+      selectedProviders,
     );
-    const publicBaseUrl = normalizePublicBaseUrl(await textPrompt({
-      message: files.config.publicBaseUrl
-        ? `What is the public base URL? Press Enter to keep ${files.config.publicBaseUrl}`
-        : "What is the public base URL?",
-      placeholder: files.config.publicBaseUrl ?? "https://your-tunnel-host.example.com",
-      defaultValue: files.config.publicBaseUrl ?? "",
-      validate: validateRequiredPublicBaseUrl,
-    }));
 
     const config: DevspaceUserConfig = {
+      ...files.config,
       host: files.config.host ?? "127.0.0.1",
       port,
-      allowedRoots,
+      ...(allowedRoots ? { allowedRoots } : {}),
       publicBaseUrl,
-      subagents: resolveSubagentsFlag(files.config),
+      subagents,
     };
     const auth = {
       ownerToken: files.auth.ownerToken ?? generateOwnerToken(),
     };
 
-    const configPath = writeDevspaceConfig(config);
-    const authPath = writeDevspaceAuth(auth);
-    const seededSkillPaths = config.subagents ? ensureDevspaceDefaultSkills() : [];
+    writeDevspaceConfig(config);
+    writeDevspaceAuth(auth);
 
     const lines = [
-      `Config: ${configPath}`,
-      `Auth: ${authPath}`,
-      ...seededSkillPaths.map((path) => `Default skill: ${path}`),
-      `Local MCP URL: http://${config.host}:${config.port}/mcp`,
-      ...(publicBaseUrl ? [`Public MCP URL: ${publicBaseUrl}/mcp`] : []),
+      ...(allowedRoots ? [`Project folders: ${allowedRoots.join(", ")}`] : []),
+      `Coding Agents: ${selectedProviders.join(", ")}`,
+      ...(publicBaseUrl ? [`ChatGPT connection URL: ${publicBaseUrl}/mcp`] : []),
     ];
-    prompts.note(lines.join("\n"), "DevSpace configured");
-    prompts.note(
-      [
-        `Owner password: ${auth.ownerToken}`,
-        "Use this when ChatGPT or Claude asks you to approve DevSpace access.",
-        `Stored at: ${authPath}`,
-      ].join("\n"),
-      "Owner password",
-    );
-    prompts.outro("Run `devspace serve` to start the MCP server.");
+    prompts.note(lines.join("\n"), "DevSpace is ready");
+    if (useChatGpt) {
+      prompts.note(
+        [
+          `Owner password: ${auth.ownerToken}`,
+          "Use this when ChatGPT asks you to approve DevSpace access.",
+        ].join("\n"),
+        "Owner password",
+      );
+    }
+    if (useCodingAgents) {
+      prompts.note(
+        [
+          SUBAGENT_SKILL_INSTALL_COMMAND,
+          "",
+          "The Skills CLI will let you choose which Coding Agents receive it.",
+        ].join("\n"),
+        "Install the Subagents skill",
+      );
+    }
+    const nextSteps = [
+      useChatGpt ? "Run `devspace serve`, then connect ChatGPT." : undefined,
+      useCodingAgents ? "Run the skill command above before delegating from your Coding Agents." : undefined,
+    ].filter(Boolean).join(" ");
+    prompts.outro(nextSteps);
   } catch (error) {
     if (error instanceof SetupCancelledError) {
       prompts.cancel("Setup cancelled");
@@ -213,9 +299,7 @@ async function serve(): Promise<void> {
     }
     console.log("auth: Owner password approval required");
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
-    if (config.subagents) {
-      console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
-    }
+    console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
   });
 
   let shuttingDown = false;
@@ -253,6 +337,12 @@ async function runDoctor(): Promise<void> {
     console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    const providers = buildLocalAgentProviderStatuses(
+      config.subagents,
+      getLocalAgentProviderAvailabilitySnapshot(),
+    );
+    console.log(`Subagents: ${config.subagents.enabled ? "enabled" : "disabled"}`);
+    console.log(`Subagent providers: ${formatLocalAgentProviderStatusSummary(providers)}`);
   } catch (error) {
     console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -299,8 +389,8 @@ function printHelp(): void {
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace agents ls       List subagent sessions",
-      "  devspace agents run <profile-or-provider> [--model <model>] [--thinking <level>] <prompt>",
-      "  devspace agents continue <id> [--model <model>] [--thinking <level>] <prompt>",
+      "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] <prompt>",
+      "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
       "  devspace agents show <id>",
       "  devspace agents daemon <status|stop|logs>",
       "  devspace -v, --version   Print the installed version",
@@ -313,12 +403,11 @@ function printHelp(): void {
 
 async function runAgentsCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
-  const json = rest.includes("--json");
-  const commandArgs = rest.filter((arg) => arg !== "--json");
+  const { args: commandArgs, json } = extractJsonOption(rest);
   switch (subcommand) {
     case "ls":
     case "list":
-      await runAgentsList(json);
+      await runAgentsList(commandArgs, json);
       return;
     case "run":
       await runAgentsRun(commandArgs, json);
@@ -328,6 +417,9 @@ async function runAgentsCommand(args: string[]): Promise<void> {
       return;
     case "show":
       await runAgentsShow(commandArgs, json);
+      return;
+    case "targets":
+      await runAgentsTargets(commandArgs, json);
       return;
     case "daemon":
       await runAgentsDaemon(commandArgs, json);
@@ -343,15 +435,32 @@ async function runAgentsCommand(args: string[]): Promise<void> {
   }
 }
 
-async function runAgentsList(json: boolean): Promise<void> {
+async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
+  if (args.length > 0) throw new Error("Usage: devspace agents targets [--json]");
+  const config = loadConfig();
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
+  const providers = buildLocalAgentProviderStatuses(
+    config.subagents,
+    getLocalAgentProviderAvailabilitySnapshot(),
+  );
+  const catalog = buildLocalAgentCatalog(config.subagents, profiles, providers);
+  const output = presentAgentTargetCatalog(catalog);
+  if (json) printJson(output);
+  else console.log(formatAgentTargetCatalog(output));
+}
+
+async function runAgentsList(args: string[], json: boolean): Promise<void> {
+  if (args.length > 0) throw new Error("Usage: devspace agents ls [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const result = await client.list(resolveCurrentWorkspaceScope());
+  const result = await client.list(resolveCliWorkspaceContext(config.allowedRoots));
   const agents = presentAgentResult(result, json);
   if (!agents) return;
 
+  const summaries = agents.map(presentAgentSummary);
   if (json) {
-    console.log(JSON.stringify(agents, null, 2));
+    printJson(summaries);
     return;
   }
 
@@ -360,15 +469,15 @@ async function runAgentsList(json: boolean): Promise<void> {
     return;
   }
 
-  for (const agent of agents) {
-    console.log(formatAgentLine(agent));
+  for (const summary of summaries) {
+    console.log(formatAgentSummary(summary));
   }
 }
 
 async function runAgentsRun(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
   const config = loadConfig();
-  const scope = resolveCurrentWorkspaceScope();
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
   const client = createLocalAgentClient(config);
   const result = await client.start({
     target: parsed.target,
@@ -376,42 +485,44 @@ async function runAgentsRun(args: string[], json: boolean): Promise<void> {
     workspaceRoot: scope.workspaceRoot,
     workspaceId: scope.workspaceId,
     model: parsed.model,
-    thinking: parsed.thinking,
+    effort: parsed.effort,
   });
   const record = presentAgentResult(result, json);
   if (!record) return;
+  const receipt = presentAgentReceipt(record);
   if (json) {
-    console.log(JSON.stringify(record, null, 2));
+    printJson(receipt);
     return;
   }
-  console.log(formatAgentLine(record));
+  console.log(formatAgentReceipt(receipt));
 }
 
 async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentContinueArgs(args);
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCurrentWorkspaceScope();
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
   const result = await client.continue(parsed.agentId, parsed.prompt, {
     model: parsed.model,
-    thinking: parsed.thinking,
+    effort: parsed.effort,
   }, scope);
   const record = presentAgentResult(result, json);
   if (!record) return;
+  const receipt = presentAgentReceipt(record);
   if (json) {
-    console.log(JSON.stringify(record, null, 2));
+    printJson(receipt);
     return;
   }
-  console.log(formatAgentLine(record));
+  console.log(formatAgentReceipt(receipt));
 }
 
 async function runAgentsShow(args: string[], json: boolean): Promise<void> {
-  const [id] = args;
-  if (!id) throw new Error("Usage: devspace agents show <id>");
+  const [id, ...extra] = args;
+  if (!id || extra.length > 0) throw new Error("Usage: devspace agents show <id> [--json]");
 
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCurrentWorkspaceScope();
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
   const initial = await client.get(id, scope);
   let record = presentAgentResult(initial, json);
   if (!record) return;
@@ -424,46 +535,35 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
     record = refreshed;
   }
 
-  if (json) {
-    console.log(JSON.stringify(record, null, 2));
-    return;
-  }
-
-  console.log(formatAgentLine(record));
-  if (record.latestResponse) {
-    console.log(record.latestResponse);
-    return;
-  }
-  if (record.error) {
-    console.log(record.error);
-    return;
-  }
-  if (record.status === "starting" || record.status === "running") {
-    console.log(`No final response yet. Call \`devspace agents show ${record.id}\` again later.`);
-  }
+  const observation = presentAgentObservation(record);
+  if (json) printJson(observation);
+  else console.log(formatAgentObservation(observation));
 }
 
 async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
-  const [subcommand] = args;
+  const [subcommand, ...extra] = args;
+  if (extra.length > 0) throw new Error("Usage: devspace agents daemon <status|stop|logs> [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
   switch (subcommand) {
     case "status": {
       const status = presentAgentResult(await client.status(), json);
       if (!status) return;
-      console.log(JSON.stringify(status, null, 2));
+      printJson(status);
       return;
     }
     case "stop": {
       const status = presentAgentResult(await client.stop(), json);
       if (!status) return;
-      console.log(json ? JSON.stringify(status, null, 2) : "Local agent daemon stop requested.");
+      if (json) printJson(status);
+      else console.log("Local agent daemon stop requested.");
       return;
     }
     case "logs": {
       const logs = presentAgentResult(await client.logs(), json);
       if (logs === undefined) return;
-      console.log(json ? JSON.stringify({ logs }, null, 2) : (logs || "No local agent daemon logs found."));
+      if (json) printJson({ logs });
+      else console.log(logs || "No local agent daemon logs found.");
       return;
     }
     default:
@@ -471,28 +571,23 @@ async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
   }
 }
 
-function resolveCurrentWorkspaceRoot(): string {
-  return resolve(process.env.DEVSPACE_WORKSPACE_ROOT || process.cwd());
-}
-
-function resolveCurrentWorkspaceScope(): { workspaceId: string; workspaceRoot: string } {
-  const workspaceId = process.env.DEVSPACE_WORKSPACE_ID?.trim();
-  if (!workspaceId) {
-    throw new Error("A DevSpace workspace is required. Run this command from an open_workspace session.");
+function extractJsonOption(args: string[]): { args: string[]; json: boolean } {
+  const commandArgs: string[] = [];
+  let json = false;
+  let optionsEnded = false;
+  for (const argument of args) {
+    if (!optionsEnded && argument === "--") {
+      optionsEnded = true;
+      commandArgs.push(argument);
+      continue;
+    }
+    if (!optionsEnded && argument === "--json") {
+      json = true;
+      continue;
+    }
+    commandArgs.push(argument);
   }
-  return {
-    workspaceId,
-    workspaceRoot: resolveCurrentWorkspaceRoot(),
-  };
-}
-
-function formatAgentLine(agent: Pick<
-  LocalAgentRecord,
-  "id" | "status" | "profileName" | "provider" | "model" | "thinking"
->): string {
-  const model = agent.model ? ` ${agent.model}` : "";
-  const thinking = agent.thinking ? ` thinking=${agent.thinking}` : "";
-  return `${agent.id} ${agent.status} ${agent.profileName} ${agent.provider}${model}${thinking}`;
+  return { args: commandArgs, json };
 }
 
 function presentAgentResult<T, E extends LocalAgentError>(
@@ -501,11 +596,15 @@ function presentAgentResult<T, E extends LocalAgentError>(
 ): T | undefined {
   if (result.isOk()) return result.value;
   if (json) {
-    console.log(JSON.stringify({ ok: false, error: toAgentErrorPayload(result.error) }, null, 2));
+    printJson({ error: toAgentErrorPayload(result.error) });
     process.exitCode = 1;
     return undefined;
   }
   throw new Error(result.error.message);
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -519,9 +618,10 @@ function printAgentsHelp(): void {
       "",
       "Usage:",
       "  devspace agents ls [--json]",
-      "  devspace agents run <profile-or-provider> [--model <model>] [--thinking <level>] [--json] <prompt>",
-      "  devspace agents continue <id> [--model <model>] [--thinking <level>] [--json] <prompt>",
+      "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] [--json] <prompt>",
+      "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents show <id> [--json]",
+      "  devspace agents targets [--json]",
       "  devspace agents daemon <status|stop|logs> [--json]",
     ].join("\n"),
   );
@@ -567,11 +667,8 @@ async function textPrompt(options: TextPromptOptions): Promise<string> {
   return value || options.defaultValue;
 }
 
-function validatePort(value: string | undefined): string | undefined {
-  const port = Number(value);
-  return Number.isInteger(port) && port >= 1 && port <= 65535
-    ? undefined
-    : "Enter a port between 1 and 65535.";
+function isValidPort(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65535;
 }
 
 function validateRequiredPublicBaseUrl(value: string | undefined): string | undefined {

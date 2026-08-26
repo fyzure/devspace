@@ -10,6 +10,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SqliteCardStore } from "./card-store.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
+import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
+import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createMcpServer } from "./server.js";
@@ -83,7 +85,7 @@ test("widget cards are snapshotted locally and recoverable by card id", async (t
 });
 
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
-  const providerNote = "app-server support is verified on first run";
+  const providerNote = "available";
   const context = await fixture(t, {
     localAgentProviders: [{ name: "codex", available: true, note: providerNote }],
   });
@@ -106,6 +108,10 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   assert.ok(Array.isArray(firstStructured.availableAgentsFiles));
   assert.ok(Array.isArray(firstStructured.skills));
   assert.ok(Array.isArray(firstStructured.agentProviders));
+  assert.equal(
+    (firstStructured.agentProviders as Array<Record<string, unknown>>)[0]?.id,
+    "codex",
+  );
   assert.equal(
     (firstStructured.agentProviders as Array<Record<string, unknown>>)[0]?.note,
     providerNote,
@@ -271,6 +277,50 @@ test("full mode hands off tracked commands and recovers their retained results",
   assert.match(responseText(timedOutBash), /timed out/i);
 });
 
+test("open_workspace refreshes provider availability for each catalog", async (t) => {
+  let available = false;
+  const context = await fixture(t, {
+    localAgentProviders: () => [{ name: "codex", available }],
+  });
+
+  const unavailable = structuredContent(await callOpen(context.client, context.project, "chat-1"));
+  assert.deepEqual(unavailable.agentProviders, []);
+  assert.deepEqual(unavailable.agents, []);
+
+  available = true;
+  const usable = structuredContent(await callOpen(context.client, context.project, "chat-2"));
+  assert.equal(
+    (usable.agentProviders as Array<Record<string, unknown>>)[0]?.id,
+    "codex",
+  );
+  assert.equal(
+    (usable.agents as Array<Record<string, unknown>>)[0]?.name,
+    "reviewer",
+  );
+});
+
+test("open_workspace omits providers disabled by configuration", async (t) => {
+  const context = await fixture(t, {
+    localAgentProviders: [
+      { name: "codex", available: true },
+      { name: "claude", available: true },
+    ],
+    subagents: {
+      enabled: true,
+      providers: [
+        { id: "codex", enabled: true },
+        { id: "claude", enabled: false },
+      ],
+    },
+  });
+
+  const opened = structuredContent(await callOpen(context.client, context.project, "chat-1"));
+  assert.deepEqual(
+    (opened.agentProviders as Array<Record<string, unknown>>).map((provider) => provider.id),
+    ["codex"],
+  );
+});
+
 test("concurrent checkout opens return one full context and one reuse instruction", async (t) => {
   const context = await fixture(t);
   const [first, second] = await Promise.all([
@@ -380,7 +430,7 @@ test("checkout reuse and context suppression survive a registry restart", async 
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
     restoredCardStore,
-    [],
+    () => [],
     [],
   );
   const [restoredClientTransport, restoredServerTransport] = InMemoryTransport.createLinkedPair();
@@ -421,7 +471,11 @@ interface ServerFixture {
 
 async function fixture(
   t: TestContext,
-  options: { git?: boolean; localAgentProviders?: LocalAgentProviderAvailability[] } = {},
+  options: {
+    git?: boolean;
+    localAgentProviders?: LocalAgentProviderAvailability[] | (() => LocalAgentProviderAvailability[]);
+    subagents?: SubagentsConfig;
+  } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
   const project = join(root, "project");
@@ -450,7 +504,10 @@ async function fixture(
     await git(project, ["commit", "-m", "Initial commit"]);
   }
 
-  const config = loadConfig({
+  const initialProviderAvailability = typeof options.localAgentProviders === "function"
+    ? options.localAgentProviders()
+    : options.localAgentProviders ?? [];
+  const loadedConfig = loadConfig({
     DEVSPACE_CONFIG_DIR: join(root, ".config"),
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
@@ -461,6 +518,26 @@ async function fixture(
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",
   });
+  const config: ServerConfig = options.localAgentProviders
+    ? {
+        ...loadedConfig,
+        subagents: options.subagents ?? {
+          enabled: true,
+          providers: initialProviderAvailability.map((provider) => ({
+            id: provider.name,
+            enabled: true,
+          })),
+        },
+      }
+    : loadedConfig;
+  const resolveProviderAvailability: () => LocalAgentProviderAvailability[] =
+    typeof options.localAgentProviders === "function"
+      ? options.localAgentProviders
+      : () => initialProviderAvailability;
+  const resolveLocalAgentProviders = () => buildLocalAgentProviderStatuses(
+    config.subagents,
+    resolveProviderAvailability(),
+  );
   const store = new SqliteWorkspaceStore(stateDir);
   const cardStore = new SqliteCardStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
@@ -470,7 +547,7 @@ async function fixture(
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
     cardStore,
-    options.localAgentProviders ?? [],
+    resolveLocalAgentProviders,
     [],
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

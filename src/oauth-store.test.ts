@@ -45,9 +45,10 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 2, name: "oauth-state" },
       { version: 3, name: "local-agent-sessions" },
       { version: 4, name: "workspace-conversation-bindings" },
-      { version: 6, name: "process-sessions" },
-      { version: 7, name: "card-snapshots" },
-      { version: 8, name: "local-agent-structured-errors" },
+      { version: 5, name: "local-agent-structured-errors" },
+      { version: 6, name: "local-agent-effort-rename" },
+      { version: 7, name: "process-sessions" },
+      { version: 8, name: "card-snapshots" },
       { version: 9, name: "card-snapshot-invocations" },
       { version: 10, name: "unique-card-snapshot-invocations" },
     ]);

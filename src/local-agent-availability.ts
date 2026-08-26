@@ -35,6 +35,8 @@ export function checkLocalAgentProviderAvailability(
       return commandAvailability(provider, env.CURSOR_COMMAND ?? "cursor-agent", env);
     case "copilot":
       return commandAvailability(provider, env.COPILOT_COMMAND ?? "copilot", env);
+    case "grok":
+      return commandAvailability(provider, env.GROK_COMMAND ?? "grok", env);
   }
 }
 
@@ -85,7 +87,7 @@ function codexAvailability(env: NodeJS.ProcessEnv): LocalAgentProviderAvailabili
   return availability.available
     ? {
         ...availability,
-        note: "executable detected; app-server support is verified on first run",
+        note: "available",
       }
     : availability;
 }

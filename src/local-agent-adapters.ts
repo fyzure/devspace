@@ -3,7 +3,7 @@ import {
   AcpLocalAgentDriver,
   resolveAcpCommand,
   resolveAcpModelConfigUpdate,
-  resolveAcpThinkingConfigUpdate,
+  resolveAcpEffortConfigUpdate,
 } from "./local-agent-acp.js";
 import {
   ClaudeLocalAgentDriver,
@@ -43,6 +43,7 @@ export function createLocalAgentDrivers(
     new PiLocalAgentDriver(options.piSessionFactory),
     new AcpLocalAgentDriver("cursor", options.env),
     new AcpLocalAgentDriver("copilot", options.env),
+    new AcpLocalAgentDriver("grok", options.env),
   ];
 }
 
@@ -57,6 +58,7 @@ export function createLocalAgentAdapter(
     case "pi": return new PiLocalAgentDriver(options.piSessionFactory);
     case "cursor":
     case "copilot":
+    case "grok":
       return new AcpLocalAgentDriver(provider, options.env);
   }
 }
@@ -72,5 +74,5 @@ export {
   extractPiProviderError,
   resolveAcpCommand,
   resolveAcpModelConfigUpdate,
-  resolveAcpThinkingConfigUpdate,
+  resolveAcpEffortConfigUpdate,
 };

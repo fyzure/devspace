@@ -20,6 +20,9 @@ import type {
   LocalAgentRuntimeContext,
 } from "./local-agent-runtime.js";
 
+const OPENCODE_SESSION_POLL_INTERVAL_MS = 250;
+const OPENCODE_SESSION_POLL_TIMEOUT_MS = 5 * 60_000;
+
 export type OpencodeClientLike = Pick<OpencodeClient, "v2">;
 
 export interface OpencodeServerLike {
@@ -58,7 +61,7 @@ export class OpencodeRuntime implements LocalAgentRuntime {
         try {
           await assertOpencodeHealthy(this.client);
           const resumed = Boolean(input.providerSessionId);
-          const initialModel = input.model ? parseOpencodeModel(input.model, input.thinking) : undefined;
+          const initialModel = input.model ? parseOpencodeModel(input.model, input.effort) : undefined;
           const sessionId = input.providerSessionId ?? await createOpencodeSession(this.client, input, initialModel);
           await callbacks?.onSessionId?.(sessionId);
           await this.client.v2.session.switchAgent({
@@ -66,13 +69,14 @@ export class OpencodeRuntime implements LocalAgentRuntime {
             agent: opencodeAgentFor(input.writeMode),
           }, { throwOnError: true });
 
-          const model = initialModel ?? (input.thinking ? await modelWithThinking(this.client, sessionId, input.thinking) : undefined);
+          const model = initialModel ?? (input.effort ? await modelWithEffort(this.client, sessionId, input.effort) : undefined);
           if (model && (resumed || !initialModel)) {
             await this.client.v2.session.switchModel({ sessionID: sessionId, model }, { throwOnError: true });
           }
           const promptResult = await promptOpencodeSession(this.client, sessionId, input);
-          await waitForOpencodeSession(this.client, sessionId);
-          const messages = await readOpencodeMessages(this.client, sessionId);
+          await waitForOpencodeSession(this.client, sessionId, promptResult);
+          const promptId = extractOpenCodePromptId(promptResult);
+          const messages = await readOpencodeMessages(this.client, sessionId, promptId);
           const finalResponse = requireFinalResponse(
             extractOpenCodeFinalResponse(messages) || extractOpenCodeFinalResponse(promptResult),
           );
@@ -235,10 +239,10 @@ class OpencodeHealthError extends Error {
   }
 }
 
-async function modelWithThinking(
+async function modelWithEffort(
   client: OpencodeClientLike,
   sessionId: string,
-  thinking: string,
+  effort: string,
 ): Promise<ModelRef> {
   const result = await client.v2.session.get({ sessionID: sessionId }, { throwOnError: true });
   const model = result.data.data.model;
@@ -248,10 +252,10 @@ async function modelWithThinking(
       provider: "opencode",
       operation: "resolve_model",
       retryable: false,
-      message: "OpenCode did not return the current session model for a thinking override.",
+      message: "OpenCode did not return the current session model for an effort override.",
     });
   }
-  return { ...model, variant: thinking };
+  return { ...model, variant: effort };
 }
 
 async function promptOpencodeSession(
@@ -266,16 +270,117 @@ async function promptOpencodeSession(
   }, { throwOnError: true });
 }
 
-async function waitForOpencodeSession(client: OpencodeClientLike, sessionId: string): Promise<void> {
-  await client.v2.session.wait({ sessionID: sessionId }, { throwOnError: true });
+async function waitForOpencodeSession(
+  client: OpencodeClientLike,
+  sessionId: string,
+  promptResult: unknown,
+): Promise<void> {
+  // OpenCode 1.18 accepts the prompt before its foreground drain is ready.
+  // Its wait endpoint rejects that state and can keep rejecting after the
+  // session has completed, so use the v2 active-session lifecycle instead.
+  const active = typeof client.v2.session.active === "function"
+    ? client.v2.session.active.bind(client.v2.session)
+    : undefined;
+  if (!active) {
+    await client.v2.session.wait({ sessionID: sessionId }, { throwOnError: true });
+    return;
+  }
+
+  const promptId = extractOpenCodePromptId(promptResult);
+  const deadline = Date.now() + OPENCODE_SESSION_POLL_TIMEOUT_MS;
+  let observedActive = false;
+  while (true) {
+    const messages = await readOpencodeMessages(client, sessionId, promptId);
+    const activity = await active({ throwOnError: true });
+    const running = isOpenCodeSessionActive(activity, sessionId);
+    if (running) observedActive = true;
+
+    const completed = hasCompletedOpenCodeTurn(messages, promptId);
+    if (completed && (promptId !== undefined || (observedActive && !running))) return;
+    if (Date.now() >= deadline) {
+      throw new AgentProviderProtocolError({
+        code: "PROVIDER_PROTOCOL_ERROR",
+        provider: "opencode",
+        operation: "wait_for_session",
+        retryable: false,
+        message: "OpenCode did not finish the session before the provider timeout.",
+      });
+    }
+    await delay(OPENCODE_SESSION_POLL_INTERVAL_MS);
+  }
 }
 
 async function readOpencodeMessages(
   client: OpencodeClientLike,
   sessionId: string,
+  promptId?: string,
 ): Promise<SessionMessagesResponse> {
-  const result = await client.v2.session.messages({ sessionID: sessionId, order: "asc", limit: 100 }, { throwOnError: true });
-  return result.data;
+  const messages: SessionMessagesResponse["data"] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const result = await client.v2.session.messages({
+      sessionID: sessionId,
+      limit: 100,
+      ...(cursor ? { cursor } : { order: "asc" }),
+    }, { throwOnError: true });
+    const page = result.data;
+    messages.push(...page.data);
+
+    // A prompt-specific read can stop as soon as the submitted turn is
+    // complete. Reads without a prompt id still walk the full history because
+    // they are used to extract the final response after the wait fallback.
+    if (promptId !== undefined && hasCompletedOpenCodeTurn({ data: messages }, promptId)) {
+      break;
+    }
+
+    const nextCursor = page.cursor?.next;
+    if (!nextCursor || seenCursors.has(nextCursor)) break;
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  return { data: messages, cursor: {} };
+}
+
+function extractOpenCodePromptId(value: unknown): string | undefined {
+  const id = asRecord(unwrapProviderPayload(value))?.id;
+  return typeof id === "string" ? id : undefined;
+}
+
+function isOpenCodeSessionActive(value: unknown, sessionId: string): boolean {
+  const activeSessions = asRecord(unwrapProviderPayload(value));
+  return activeSessions?.[sessionId] !== undefined;
+}
+
+function hasCompletedOpenCodeTurn(value: unknown, promptId?: string): boolean {
+  const root = unwrapProviderPayload(value);
+  const messages = Array.isArray(root) ? root : readArray(root, "messages");
+  if (!messages) return false;
+
+  let promptSeen = promptId === undefined;
+  for (const message of messages) {
+    const record = asRecord(message);
+    if (!record) continue;
+    const info = asRecord(record.info) ?? record;
+    const role = typeof info.role === "string" ? info.role : record.type;
+    if (promptId !== undefined && info.id === promptId && role === "user") {
+      promptSeen = true;
+      continue;
+    }
+    if (!promptSeen || role !== "assistant") continue;
+
+    const time = asRecord(info.time) ?? asRecord(record.time);
+    if (typeof info.finish === "string" || typeof record.finish === "string") return true;
+    if (typeof time?.completed === "number") return true;
+    if (info.error !== undefined || record.error !== undefined) return true;
+  }
+  return false;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function parseOpencodeModel(model: string, variant?: string): ModelRef {

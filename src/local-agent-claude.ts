@@ -103,10 +103,10 @@ export class ClaudeQueryRuntime implements LocalAgentRuntime {
         }
         if (this.providerSessionId) await callbacks?.onSessionId?.(this.providerSessionId);
         const flagSettings = claudeAuthoritySettings(input.workspaceRoot, input.writeMode);
-        if (input.thinking) {
+        if (input.effort) {
           Object.assign(flagSettings, {
             alwaysThinkingEnabled: true,
-            effortLevel: input.thinking,
+            effortLevel: input.effort,
           });
         }
         await this.query.applyFlagSettings(flagSettings);
@@ -233,7 +233,7 @@ export class ClaudeLocalAgentDriver implements LocalAgentDriver {
           providerSessionId: context.providerSessionId,
           writeMode: context.writeMode,
           model: context.model,
-          thinking: context.thinking,
+          effort: context.effort,
         };
         const query = await this.factory({
           context,
@@ -268,7 +268,7 @@ export function claudeQueryOptions(
   return {
     cwd: input.workspaceRoot,
     ...(input.model ? { model: input.model } : {}),
-    ...(input.thinking ? { thinking: { type: "adaptive" }, effort: input.thinking } : {}),
+    ...(input.effort ? { thinking: { type: "adaptive" }, effort: input.effort } : {}),
     ...(context.providerSessionId ? { resume: context.providerSessionId } : {}),
     permissionMode,
     sandbox: authority.sandbox,

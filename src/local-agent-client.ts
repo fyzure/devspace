@@ -8,6 +8,7 @@ import type { ServerConfig } from "./config.js";
 import {
   AgentDaemonInvalidRequestError,
   AgentDaemonInvalidResponseError,
+  AgentDaemonProtocolMismatchError,
   AgentDaemonStartupError,
   AgentDaemonTimeoutError,
   AgentDaemonUnauthorizedError,
@@ -34,6 +35,7 @@ import {
 import {
   LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
   ensureLocalAgentDaemonSecret,
+  isProcessAlive,
   localAgentDaemonPaths,
   readLocalAgentDaemonSecret,
   type LocalAgentDaemonPaths,
@@ -219,10 +221,84 @@ export class LocalAgentClient {
           message: "Local agent daemon returned an invalid hello error.",
         }));
       }
+      if (
+        error.code === "DAEMON_PROTOCOL_MISMATCH"
+        && response.value.protocolVersion < LOCAL_AGENT_DAEMON_PROTOCOL_VERSION
+      ) {
+        return this.replaceIdleOlderDaemon(authToken.value, response.value.protocolVersion, error);
+      }
       return error.code === "DAEMON_UNAVAILABLE" ? Result.ok(undefined) : Result.err(error);
     }
     const decoded = decodeValue(response.value.result, "hello", decodeDaemonStatus);
     return decoded.map((status) => status.state === "ready" ? status : undefined);
+  }
+
+  private async replaceIdleOlderDaemon(
+    authToken: string,
+    protocolVersion: number,
+    mismatch: AgentDaemonProtocolMismatchError,
+  ): Promise<BetterResult<LocalAgentDaemonStatus | undefined, AgentDaemonError>> {
+    const statusResponse = await sendRequest(this.endpoint, {
+      requestId: randomUUID(),
+      protocolVersion,
+      authToken,
+      method: "hello",
+      params: {},
+    }, this.requestTimeoutMs);
+    if (statusResponse.isErr() || !statusResponse.value.ok) return Result.err(mismatch);
+    const status = decodeValue(statusResponse.value.result, "hello", decodeDaemonStatus);
+    if (status.isErr()) return status;
+    if (status.value.activeTurns > 0) {
+      return Result.err(new AgentDaemonProtocolMismatchError({
+        code: "DAEMON_PROTOCOL_MISMATCH",
+        operation: "startup",
+        retryable: true,
+        cause: mismatch,
+        message: "An older local agent daemon is still running active turns. Retry after they finish.",
+      }));
+    }
+
+    const stopResponse = await sendRequest(this.endpoint, {
+      requestId: randomUUID(),
+      protocolVersion,
+      authToken,
+      method: "daemon.stop",
+      params: {},
+    }, this.requestTimeoutMs);
+    if (stopResponse.isErr() || !stopResponse.value.ok) return Result.err(mismatch);
+
+    const deadline = Date.now() + this.startupTimeoutMs;
+    while (Date.now() < deadline) {
+      await delay(RETRY_DELAY_MS);
+      const probe = await sendRequest(this.endpoint, {
+        requestId: randomUUID(),
+        protocolVersion,
+        authToken,
+        method: "hello",
+        params: {},
+      }, Math.min(this.requestTimeoutMs, 250));
+      if (probe.isErr() && probe.error.code === "DAEMON_UNAVAILABLE") {
+        if (!existsSync(this.paths.lockPath) || !isProcessAlive(status.value.pid)) {
+          return Result.ok(undefined);
+        }
+        continue;
+      }
+      if (
+        probe.isOk()
+        && probe.value.protocolVersion >= LOCAL_AGENT_DAEMON_PROTOCOL_VERSION
+      ) {
+        // Another client completed the replacement while this client was
+        // waiting for the old endpoint to disappear.
+        return this.tryHello();
+      }
+    }
+    return Result.err(new AgentDaemonStartupError({
+      code: "DAEMON_STARTUP_FAILURE",
+      operation: "startup",
+      retryable: true,
+      cause: mismatch,
+      message: "The older local agent daemon did not stop in time for the upgrade.",
+    }));
   }
 
   private async request<M extends LocalAgentDaemonRequest["method"]>(

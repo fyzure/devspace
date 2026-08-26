@@ -28,6 +28,7 @@ const manager = new LocalAgentManager({
   agentDir: config.agentDir,
   allowedRoots: config.allowedRoots,
   logger: log,
+  subagents: config.subagents,
 });
 const daemon = new LocalAgentDaemon({
   stateDir: paths.stateDir,

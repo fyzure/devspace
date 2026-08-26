@@ -10,6 +10,7 @@ import {
   resolveAcpCommand,
   selectAcpPermissionOption,
 } from "./local-agent-acp.js";
+import { GrokPromptCompletionRegistry } from "./local-agent-grok.js";
 
 const requests: Array<{ method: string; params?: unknown }> = [];
 const queues = new Map<string, { values: unknown[] }>();
@@ -25,7 +26,7 @@ const connection = {
           sessionId,
           configOptions: [
             { type: "select", category: "model", id: "model", options: [{ value: "model-a" }] },
-            { type: "select", category: "thought_level", id: "thinking", options: [{ value: "high" }] },
+            { type: "select", category: "thought_level", id: "effort", options: [{ value: "high" }] },
           ],
         };
       }
@@ -65,7 +66,7 @@ const firstResult = await runtime.run({
   prompt: "first",
   workspaceRoot: "/tmp/project",
   model: "model-a",
-  thinking: "high",
+  effort: "high",
   writeMode: "read_only",
 }, {
   onSessionId: (sessionId) => { sessionIds.push(sessionId); },
@@ -78,7 +79,7 @@ const warmResult = await runtime.run({
   workspaceRoot: "/tmp/project",
   providerSessionId: first.providerSessionId ?? undefined,
   model: "model-a",
-  thinking: "high",
+  effort: "high",
   writeMode: "full_access",
 }, {
   onSessionId: (sessionId) => { sessionIds.push(sessionId); },
@@ -116,7 +117,7 @@ const resumedPersistedResult = await resumedRuntime.run({
   workspaceRoot: "/tmp/project",
   providerSessionId: first.providerSessionId ?? undefined,
   model: "model-a",
-  thinking: "high",
+  effort: "high",
 });
 assert.equal(resumedPersistedResult.isOk(), true);
 if (resumedPersistedResult.isErr()) throw resumedPersistedResult.error;
@@ -125,7 +126,7 @@ assert.equal(resumedPersisted.finalResponse, "ACP response");
 assert.equal(
   requests.filter(({ method }) => method === "session/set_config_option").length,
   4,
-  "cold resume must not require config metadata just to preserve prior model/thinking state",
+  "cold resume must not require config metadata just to preserve prior model/effort state",
 );
 const resumeFailure = await resumedRuntime.run({
   prompt: "resumed",
@@ -278,6 +279,18 @@ assert.equal(resolverCalls, 1, "ACP executable identity is resolved once per dri
 assert.deepEqual(acpCommandArgs("cursor", cachedContext), [
   "acp", "--sandbox", "enabled", "--workspace", resolvedProject,
 ]);
+assert.deepEqual(acpCommandArgs("grok", {
+  ...cachedContext,
+  provider: "grok",
+  effort: "low",
+}), ["agent", "--reasoning-effort", "low", "stdio"]);
+assert.deepEqual(acpCommandArgs("grok", {
+  ...cachedContext,
+  provider: "grok",
+  effort: "low",
+}, { GROK_AGENT_PROFILE: " /tmp/grok-coding-only.md " }), [
+  "agent", "--agent-profile", "/tmp/grok-coding-only.md", "--reasoning-effort", "low", "stdio",
+]);
 assert.deepEqual(acpCommandArgs("copilot", cachedContext), [
   "--acp", "--experimental", "--sandbox", "--allow-all-tools", "--add-dir", resolvedProject, "-C", resolvedProject,
 ]);
@@ -343,6 +356,125 @@ if (process.platform !== "win32") {
     await rm(commandRoot, { recursive: true, force: true });
   }
 }
+
+const grokRequests: Array<{ method: string; params?: unknown }> = [];
+const grokQueues = new Map<string, { values: unknown[] }>();
+const grokCompletionRegistry = new GrokPromptCompletionRegistry();
+const grokConnection = {
+  agent: {
+    async request(method: string, params?: unknown): Promise<unknown> {
+      grokRequests.push({ method, params });
+      const input = params as { sessionId?: string; _meta?: { promptId?: string } } | undefined;
+      if (method === "session/new") {
+        grokQueues.set("grok_session_1", { values: [] });
+        return {
+          sessionId: "grok_session_1",
+          models: {
+            currentModelId: "grok-4.5",
+            availableModels: [{
+              modelId: "grok-4.5",
+              _meta: { reasoningEfforts: [{ id: "low", value: "low" }] },
+            }],
+          },
+        };
+      }
+      if (method === "session/set_model") return {};
+      if (method === "session/prompt") {
+        grokQueues.get(input?.sessionId ?? "")?.values.push({
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Grok response" },
+          },
+        });
+        setImmediate(() => grokCompletionRegistry.resolve({
+          sessionId: input?.sessionId ?? "",
+          promptId: input?._meta?.promptId,
+          stopReason: "end_turn",
+        }));
+        return new Promise(() => undefined);
+      }
+      return {};
+    },
+  },
+  close() {},
+  closed: new Promise<void>(() => undefined),
+};
+const grokRuntime = new AcpRuntime({
+  provider: "grok",
+  command: "grok",
+  args: ["agent", "--reasoning-effort", "low", "stdio"],
+  env: {},
+  capabilities: { resume: true, close: true },
+  queues: grokQueues,
+  grokCompletionRegistry,
+  promptCompletionTimeoutMs: 100,
+}, grokConnection);
+const grokResult = await grokRuntime.run({
+  prompt: "which model are you",
+  workspaceRoot: "/tmp/project",
+  model: "grok-4.5",
+  effort: "low",
+});
+assert.equal(grokResult.isOk(), true);
+if (grokResult.isErr()) throw grokResult.error;
+assert.equal(grokResult.value.finalResponse, "Grok response");
+assert.deepEqual(
+  grokRequests.filter(({ method }) => method === "session/set_model").map(({ params }) => params),
+  [{ sessionId: "grok_session_1", modelId: "grok-4.5", _meta: { reasoningEffort: "low" } }],
+);
+assert.equal(grokCompletionRegistry.size, 0);
+await grokRuntime.close();
+
+const grokConfigurationConnection = {
+  agent: {
+    async request(method: string): Promise<unknown> {
+      if (method === "session/new") {
+        return {
+          sessionId: "grok_configuration_session",
+          models: {
+            currentModelId: "grok-4.5",
+            availableModels: [{
+              modelId: "grok-4.5",
+              _meta: { reasoningEfforts: [{ id: "low", value: "low" }] },
+            }],
+          },
+        };
+      }
+      return {};
+    },
+  },
+  close() {},
+  closed: new Promise<void>(() => undefined),
+};
+const grokConfigurationRuntime = new AcpRuntime({
+  provider: "grok",
+  command: "grok",
+  args: ["agent", "stdio"],
+  env: {},
+}, grokConfigurationConnection);
+const invalidGrokModel = await grokConfigurationRuntime.run({
+  prompt: "invalid model",
+  workspaceRoot: "/tmp/project",
+  model: "grok-unknown",
+});
+assert.equal(invalidGrokModel.isErr(), true);
+if (invalidGrokModel.isErr()) {
+  assert.equal(invalidGrokModel.error.code, "PROVIDER_PROTOCOL_ERROR");
+  assert.equal(invalidGrokModel.error.retryable, false);
+  assert.match(invalidGrokModel.error.message, /Available models: grok-4\.5/);
+}
+const invalidGrokEffort = await grokConfigurationRuntime.run({
+  prompt: "invalid effort",
+  workspaceRoot: "/tmp/project",
+  effort: "high",
+});
+assert.equal(invalidGrokEffort.isErr(), true);
+if (invalidGrokEffort.isErr()) {
+  assert.equal(invalidGrokEffort.error.code, "PROVIDER_PROTOCOL_ERROR");
+  assert.equal(invalidGrokEffort.error.retryable, false);
+  assert.match(invalidGrokEffort.error.message, /Available efforts: low/);
+}
+await grokConfigurationRuntime.close();
 
 await resumedRuntime.close();
 await resumedRuntime.close();

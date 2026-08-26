@@ -9,6 +9,8 @@ import { daemonExecArgv, LocalAgentClient } from "./local-agent-client.js";
 import { LocalAgentDaemon, type LocalAgentDaemonManager } from "./local-agent-daemon.js";
 import {
   ensureLocalAgentDaemonSecret,
+  LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
+  LocalAgentDaemonLock,
   localAgentDaemonPaths,
 } from "./local-agent-daemon-lifecycle.js";
 import {
@@ -208,6 +210,168 @@ const startupFailure = await startupFailureClient.ensureReady();
 assert.equal(startupFailure.isErr(), true);
 if (startupFailure.isErr()) assert.equal(startupFailure.error.code, "DAEMON_STARTUP_FAILURE");
 
+const upgradeStateDir = join(root, "upgrade-state");
+await mkdir(upgradeStateDir, { recursive: true });
+const upgradePaths = localAgentDaemonPaths(upgradeStateDir);
+ensureLocalAgentDaemonSecret(upgradePaths);
+const legacyLock = new LocalAgentDaemonLock(upgradePaths);
+legacyLock.acquire();
+const legacyMethods: string[] = [];
+const legacyServer = createNetServer((socket) => {
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk: string | Buffer) => {
+    buffer += chunk.toString();
+    const newline = buffer.indexOf("\n");
+    if (newline === -1) return;
+    const request = JSON.parse(buffer.slice(0, newline)) as {
+      requestId: string;
+      protocolVersion: number;
+      method: string;
+    };
+    legacyMethods.push(`${request.method}:${request.protocolVersion}`);
+    if (request.protocolVersion !== 1) {
+      socket.end(encodeLocalAgentDaemonResponse({
+        requestId: request.requestId,
+        protocolVersion: 1,
+        ok: false,
+        error: {
+          code: "DAEMON_PROTOCOL_MISMATCH",
+          message: "Unsupported daemon protocol version 3; expected 1.",
+          retryable: false,
+        },
+      }));
+      return;
+    }
+    const stopping = request.method === "daemon.stop";
+    socket.end(encodeLocalAgentDaemonResponse({
+      requestId: request.requestId,
+      protocolVersion: 1,
+      ok: true,
+      result: {
+        state: stopping ? "stopping" : "ready",
+        protocolVersion: 1,
+        pid: process.pid,
+        endpoint: upgradePaths.endpoint,
+        startedAt: "now",
+        activeTurns: 0,
+        runtimeCount: 0,
+        clientConnections: 1,
+      },
+    }), () => {
+      if (stopping) {
+        legacyServer.close(() => {
+          setTimeout(() => legacyLock.release(), 50);
+        });
+      }
+    });
+  });
+});
+await new Promise<void>((resolveListen, rejectListen) => {
+  legacyServer.once("error", rejectListen);
+  legacyServer.listen(upgradePaths.endpoint, resolveListen);
+});
+const replacementManager = new FakeManager();
+replacementManager.activeTurnCount = 0;
+const replacementDaemon = new LocalAgentDaemon({
+  stateDir: upgradeStateDir,
+  manager: replacementManager,
+  idleShutdownMs: 60_000,
+});
+let replacementSpawns = 0;
+let spawnedBeforeLegacyLockReleased = false;
+const upgradeClient = new LocalAgentClient({
+  stateDir: upgradeStateDir,
+  startupTimeoutMs: 2_000,
+  requestTimeoutMs: 500,
+  spawnDaemon: () => {
+    replacementSpawns += 1;
+    spawnedBeforeLegacyLockReleased = existsSync(upgradePaths.lockPath);
+    void replacementDaemon.start();
+  },
+});
+try {
+  assert.equal(unwrap(await upgradeClient.ensureReady()).protocolVersion, 3);
+  assert.equal(replacementSpawns, 1);
+  assert.equal(spawnedBeforeLegacyLockReleased, false);
+  assert.deepEqual(legacyMethods.slice(0, 3), ["hello:3", "hello:1", "daemon.stop:1"]);
+} finally {
+  legacyLock.release();
+  await replacementDaemon.close();
+}
+
+const replacementRaceStateDir = join(root, "upgrade-race-state");
+await mkdir(replacementRaceStateDir, { recursive: true });
+const replacementRacePaths = localAgentDaemonPaths(replacementRaceStateDir);
+ensureLocalAgentDaemonSecret(replacementRacePaths);
+let replacementRaceProtocol = 1;
+const replacementRaceServer = createNetServer((socket) => {
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk: string | Buffer) => {
+    buffer += chunk.toString();
+    const newline = buffer.indexOf("\n");
+    if (newline === -1) return;
+    const request = JSON.parse(buffer.slice(0, newline)) as {
+      requestId: string;
+      protocolVersion: number;
+      method: string;
+    };
+    if (request.protocolVersion !== replacementRaceProtocol) {
+      socket.end(encodeLocalAgentDaemonResponse({
+        requestId: request.requestId,
+        protocolVersion: replacementRaceProtocol,
+        ok: false,
+        error: {
+          code: "DAEMON_PROTOCOL_MISMATCH",
+          message: `Unsupported daemon protocol version ${request.protocolVersion}.`,
+          retryable: false,
+        },
+      }));
+      return;
+    }
+    socket.end(encodeLocalAgentDaemonResponse({
+      requestId: request.requestId,
+      protocolVersion: replacementRaceProtocol,
+      ok: true,
+      result: {
+        state: request.method === "daemon.stop" ? "stopping" : "ready",
+        protocolVersion: replacementRaceProtocol,
+        pid: process.pid,
+        endpoint: replacementRacePaths.endpoint,
+        startedAt: "now",
+        activeTurns: 0,
+        runtimeCount: 0,
+        clientConnections: 1,
+      },
+    }), () => {
+      if (request.method === "daemon.stop") {
+        replacementRaceProtocol = LOCAL_AGENT_DAEMON_PROTOCOL_VERSION;
+      }
+    });
+  });
+});
+await new Promise<void>((resolveListen, rejectListen) => {
+  replacementRaceServer.once("error", rejectListen);
+  replacementRaceServer.listen(replacementRacePaths.endpoint, resolveListen);
+});
+const replacementRaceClient = new LocalAgentClient({
+  stateDir: replacementRaceStateDir,
+  startupTimeoutMs: 500,
+  requestTimeoutMs: 100,
+  spawnDaemon: () => {
+    throw new Error("the replacement daemon is already running");
+  },
+});
+try {
+  assert.equal(
+    unwrap(await replacementRaceClient.ensureReady()).protocolVersion,
+    LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
+  );
+} finally {
+  await new Promise<void>((resolveClose) => replacementRaceServer.close(() => resolveClose()));
+}
+
 const timeoutStateDir = join(root, "request-timeout-state");
 await mkdir(timeoutStateDir, { recursive: true });
 const timeoutPaths = localAgentDaemonPaths(timeoutStateDir);
@@ -223,11 +387,11 @@ const timeoutServer = createNetServer((socket) => {
     if (request.method !== "hello") return;
     socket.end(encodeLocalAgentDaemonResponse({
       requestId: request.requestId,
-      protocolVersion: 1,
+      protocolVersion: 3,
       ok: true,
       result: {
         state: "ready",
-        protocolVersion: 1,
+        protocolVersion: 3,
         pid: process.pid,
         endpoint: timeoutPaths.endpoint,
         startedAt: "now",
@@ -269,7 +433,7 @@ const invalidServer = createNetServer((socket) => {
     if (!buffer.includes("\n")) return;
     socket.end(encodeLocalAgentDaemonResponse({
       requestId: "wrong_request_id",
-      protocolVersion: 1,
+      protocolVersion: 3,
       ok: true,
       result: {},
     }));
@@ -323,7 +487,7 @@ try {
 
   const unauthorized = await sendRawRequest(socketDaemon.paths.endpoint, JSON.stringify({
     requestId: "unauthorized",
-    protocolVersion: 1,
+    protocolVersion: 3,
     authToken: "wrong-secret",
     method: "hello",
     params: {},

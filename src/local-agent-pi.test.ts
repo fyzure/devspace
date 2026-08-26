@@ -18,7 +18,7 @@ class FakePiSession implements PiSessionLike {
   private readonly listeners = new Set<AgentSessionEventListener>();
   disposeCount = 0;
   model?: unknown;
-  thinking?: unknown;
+  effort?: unknown;
   activeTools: string[] = [];
   toolHistory: string[][] = [];
 
@@ -46,7 +46,7 @@ class FakePiSession implements PiSessionLike {
   }
 
   setThinkingLevel(level: any): void {
-    this.thinking = level;
+    this.effort = level;
   }
 
   dispose(): void {
@@ -75,7 +75,7 @@ const first = await pool.run(driver, context, {
   prompt: "first",
   workspaceRoot: "/tmp/project",
   model: "provider/model",
-  thinking: "high",
+  effort: "high",
   writeMode: "read_only",
 }, {
   onSessionId: (sessionId) => { sessionIds.push(sessionId); },
@@ -103,7 +103,7 @@ if (second.isErr()) throw second.error;
 assert.equal(first.value.providerSessionId, "pi_session_1");
 assert.equal(second.value.finalResponse, "response:second");
 assert.deepEqual(sessions[0]?.model, { id: "model" });
-assert.equal(sessions[0]?.thinking, "high");
+assert.equal(sessions[0]?.effort, "high");
 assert.deepEqual(sessionIds, ["pi_session_1"]);
 assert.deepEqual(piToolsForWriteMode("allowed"), ["read", "grep", "find", "ls", "edit", "write", "bash"]);
 assert.ok(

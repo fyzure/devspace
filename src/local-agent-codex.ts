@@ -468,7 +468,7 @@ function turnParams(input: LocalAgentRunInput, threadId: string): Record<string,
     approvalPolicy: "never",
     sandboxPolicy: sandboxPolicyFor(input.writeMode),
     ...(input.model ? { model: input.model } : {}),
-    ...(input.thinking ? { effort: input.thinking } : {}),
+    ...(input.effort ? { effort: input.effort } : {}),
   };
 }
 

@@ -10,7 +10,7 @@ import {
   assert.equal(availability.name, "codex");
   assert.equal(typeof availability.available, "boolean");
   if (availability.available) {
-    assert.match(availability.note ?? "", /app-server support is verified on first run/);
+    assert.equal(availability.note, "available");
   }
 }
 
@@ -34,15 +34,15 @@ import {
   });
   assert.deepEqual(
     snapshot.map((provider) => provider.name),
-    ["codex", "claude", "opencode", "pi", "cursor", "copilot"],
+    ["codex", "claude", "opencode", "pi", "cursor", "copilot", "grok"],
   );
   assert.equal(snapshot.find((provider) => provider.name === "pi")?.available, true);
 }
 
 assert.equal(
   formatLocalAgentProviderAvailabilitySummary([
-    { name: "codex", available: true, note: "executable detected; app-server support is verified on first run" },
+    { name: "codex", available: true, note: "available" },
     { name: "pi", available: false, reason: "pi executable not found" },
   ]),
-  "available: codex (executable detected; app-server support is verified on first run); unavailable: pi (pi executable not found)",
+  "available: codex (available); unavailable: pi (pi executable not found)",
 );

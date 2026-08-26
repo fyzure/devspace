@@ -57,7 +57,7 @@ const context: LocalAgentRuntimeContext = {
   provider: "claude",
   workspaceRoot: "/tmp/project",
   model: "sonnet",
-  thinking: "high",
+  effort: "high",
   writeMode: "read_only",
 };
 let factoryCalls = 0;
@@ -90,7 +90,7 @@ const firstResult = await runtime.run({
   prompt: "first",
   workspaceRoot: "/tmp/project",
   model: "sonnet",
-  thinking: "high",
+  effort: "high",
   writeMode: "read_only",
 }, {
   onSessionId: (sessionId) => { sessionIds.push(sessionId); },
@@ -101,7 +101,7 @@ const first = firstResult.value;
 const secondResult = await runtime.run({
   prompt: "second",
   workspaceRoot: "/tmp/project",
-  thinking: "low",
+  effort: "low",
   writeMode: "allowed",
 });
 assert.equal(secondResult.isOk(), true);
@@ -110,7 +110,7 @@ const second = secondResult.value;
 const third = await runtime.run({
   prompt: "third",
   workspaceRoot: "/tmp/project",
-  thinking: "high",
+  effort: "high",
   writeMode: "full_access",
 });
 assert.equal(third.isOk(), true);

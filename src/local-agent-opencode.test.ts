@@ -69,7 +69,7 @@ const first = await pool.run(driver, {
     prompt: "first",
     workspaceRoot: "/tmp/project",
     model: "anthropic/sonnet",
-    thinking: "high",
+    effort: "high",
   });
 const second = await pool.run(driver, {
   agentId: "agt_two",
@@ -106,10 +106,10 @@ await pool.run(driver, {
   provider: "opencode",
   workspaceRoot: "/tmp/project",
 }, {
-  prompt: "thinking override",
+  prompt: "effort override",
   workspaceRoot: "/tmp/project",
   providerSessionId: firstRecord.providerSessionId ?? undefined,
-  thinking: "low",
+  effort: "low",
 }, {
   onSessionId: (id) => { callbackSessionId = id; },
 });
@@ -119,6 +119,137 @@ assert.deepEqual(switchInputs[0], {
   model: { providerID: "anthropic", id: "sonnet", variant: "low" },
 });
 assert.deepEqual(agentInputs[0], { sessionID: "session_1", agent: "devspace_allowed" });
+
+let readinessActiveCalls = 0;
+let readinessWaitCalls = 0;
+const readinessRaceClient = {
+  v2: {
+    session: {
+      async create() {
+        return { data: { data: { id: "session_readiness" } } };
+      },
+      async switchAgent() {},
+      async prompt() {
+        return { data: { data: { id: "prompt_readiness" } } };
+      },
+      async wait() {
+        readinessWaitCalls += 1;
+        throw new Error("Session wait is not available yet");
+      },
+      async active() {
+        readinessActiveCalls += 1;
+        return {
+          data: {
+            data: readinessActiveCalls < 3
+              ? { session_readiness: { type: "running" } }
+              : {},
+          },
+        };
+      },
+      async messages() {
+        const data = readinessActiveCalls >= 3
+          ? [
+            { type: "user", id: "prompt_readiness" },
+            {
+              type: "assistant",
+              id: "assistant_readiness",
+              time: { created: 1, completed: 2 },
+              finish: "stop",
+              content: [{ type: "text", id: "part_readiness", text: "ready response" }],
+            },
+          ]
+          : [{ type: "user", id: "prompt_readiness" }];
+        return { data: { data } };
+      },
+    },
+    health: { async get() { return { data: { healthy: true } }; } },
+  },
+} as unknown as OpencodeClientLike;
+const readinessPool = new LocalAgentRuntimePool();
+const readinessDriver = new OpencodeLocalAgentDriver(async () => ({
+  client: readinessRaceClient,
+  server: { close: () => undefined },
+}));
+const readinessResult = await readinessPool.run(readinessDriver, {
+  agentId: "agt_readiness",
+  provider: "opencode",
+  workspaceRoot: "/tmp/project",
+}, { prompt: "readiness", workspaceRoot: "/tmp/project" });
+assert.equal(readinessResult.isOk(), true, "OpenCode should wait for the active session to finish");
+if (readinessResult.isOk()) {
+  assert.equal(readinessResult.value.finalResponse, "ready response");
+}
+assert.equal(readinessWaitCalls, 0, "OpenCode should not rely on the unavailable wait endpoint");
+await readinessPool.close();
+
+const longSessionRequests: Array<{ cursor?: string; order?: string }> = [];
+const longSessionClient = {
+  v2: {
+    session: {
+      async create() {
+        return { data: { data: { id: "session_long" } } };
+      },
+      async switchAgent() {},
+      async prompt() {
+        return { data: { data: { id: "prompt_long" } } };
+      },
+      async active() {
+        return { data: { data: {} } };
+      },
+      async messages(input: unknown) {
+        const request = input as { cursor?: string; order?: string };
+        longSessionRequests.push({ cursor: request.cursor, order: request.order });
+        if (!request.cursor) {
+          return {
+            data: {
+              data: Array.from({ length: 100 }, (_, index) => ({
+                type: "assistant",
+                id: `old-assistant-${index}`,
+                finish: "stop",
+                content: [{ type: "text", text: `old response ${index}` }],
+              })),
+              cursor: { next: "long-session-next" },
+            },
+          };
+        }
+        return {
+          data: {
+            data: [
+              { type: "user", id: "prompt_long" },
+              {
+                type: "assistant",
+                id: "assistant_long",
+                finish: "stop",
+                content: [{ type: "text", text: "long response" }],
+              },
+            ],
+            cursor: {},
+          },
+        };
+      },
+    },
+  },
+} as unknown as OpencodeClientLike;
+const longSessionPool = new LocalAgentRuntimePool();
+const longSessionDriver = new OpencodeLocalAgentDriver(async () => ({
+  client: longSessionClient,
+  server: { close: () => undefined },
+}));
+const longSessionResult = await longSessionPool.run(longSessionDriver, {
+  agentId: "agt_long_session",
+  provider: "opencode",
+  workspaceRoot: "/tmp/project",
+}, { prompt: "long session", workspaceRoot: "/tmp/project" });
+assert.equal(longSessionResult.isOk(), true, "OpenCode should find completions past the first message page");
+if (longSessionResult.isOk()) {
+  assert.equal(longSessionResult.value.finalResponse, "long response");
+}
+assert.ok(
+  longSessionRequests.some((request) => request.cursor === "long-session-next"),
+  "OpenCode should follow the continuation cursor",
+);
+await longSessionPool.close();
+
 assert.equal(opencodeAgentFor("read_only"), "devspace_read_only");
 assert.equal(opencodeAgentFor("full_access"), "devspace_full_access");
 assert.deepEqual(opencodePermissionFor("allowed"), {

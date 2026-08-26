@@ -10,9 +10,9 @@ export interface LocalAgentRunInput {
   providerSessionId?: string;
   writeMode?: LocalAgentWriteMode;
   model?: string;
-  thinking?: string;
+  effort?: string;
   modelOverrideRequested?: boolean;
-  thinkingOverrideRequested?: boolean;
+  effortOverrideRequested?: boolean;
 }
 
 export interface LocalAgentRunResult {
@@ -38,7 +38,7 @@ export interface LocalAgentRuntimeContext {
   providerSessionId?: string;
   writeMode?: LocalAgentWriteMode;
   model?: string;
-  thinking?: string;
+  effort?: string;
   agentDir?: string;
 }
 

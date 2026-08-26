@@ -180,12 +180,12 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
   if (!isLocalAgentStatus(status)) throw new LocalAgentDaemonProtocolError("INVALID_RECORD", "Invalid agent status.");
   return {
     id: requiredString(record?.id, "id"),
-    workspaceId: requiredString(record?.workspaceId, "workspaceId"),
+    workspaceId: optionalString(record?.workspaceId),
     workspaceRoot: requiredString(record?.workspaceRoot, "workspaceRoot"),
     profileName: requiredString(record?.profileName, "profileName"),
     provider: requiredString(record?.provider, "provider"),
     model: optionalString(record?.model),
-    thinking: optionalString(record?.thinking),
+    effort: optionalString(record?.effort),
     providerSessionId: optionalString(record?.providerSessionId),
     status,
     latestResponse: optionalContentString(record?.latestResponse),
@@ -247,9 +247,9 @@ function decodeStartInput(value: unknown): StartLocalAgentInput {
     target: requiredString(record?.target, "target"),
     prompt: requiredContentString(record?.prompt, "prompt"),
     workspaceRoot: requiredString(record?.workspaceRoot, "workspaceRoot"),
-    workspaceId: requiredString(record?.workspaceId, "workspaceId"),
+    workspaceId: optionalString(record?.workspaceId),
     model: optionalString(record?.model),
-    thinking: optionalString(record?.thinking),
+    effort: optionalString(record?.effort),
     writeMode: decodeWriteMode(record?.writeMode),
   };
 }
@@ -263,7 +263,7 @@ function decodeContinueInput(value: unknown): { id: string; prompt: string; scop
     scope: decodeWorkspaceScope(record?.scope),
     ...(overrides ? { overrides: {
       model: optionalString(overrides.model),
-      thinking: optionalString(overrides.thinking),
+      effort: optionalString(overrides.effort),
       writeMode: decodeWriteMode(overrides.writeMode),
     } } : {}),
   };
@@ -273,7 +273,7 @@ function decodeWorkspaceScope(value: unknown): LocalAgentWorkspaceScope {
   const record = asRecord(value);
   if (!record) throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Workspace scope is required.");
   return {
-    workspaceId: requiredString(record.workspaceId, "scope.workspaceId"),
+    workspaceId: optionalString(record.workspaceId),
     workspaceRoot: requiredString(record.workspaceRoot, "scope.workspaceRoot"),
   };
 }
