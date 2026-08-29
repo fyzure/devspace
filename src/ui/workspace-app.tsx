@@ -95,13 +95,21 @@ async function boot(): Promise<void> {
   render();
 
   const restoreFromOpenAIGlobals = () => {
-    logCardProbe("openai:set_globals", { cardAlreadyPresent: Boolean(card) });
     if (mode === "openai-legacy") {
       syncOpenAILegacyHostContext();
       if (!connected) return;
+
+      const hostCardId = cardReferenceFromOpenAIHost(openAIWidgetBridge())?.cardId;
+      if (card && (!hostCardId || hostCardId === card.cardId)) return;
+
+      logCardProbe("openai:set_globals", {
+        cardAlreadyPresent: Boolean(card),
+        hostCardId,
+      });
       void recoverOpenAILegacyCard("openai:set_globals");
       return;
     }
+    logCardProbe("openai:set_globals", { cardAlreadyPresent: Boolean(card) });
     if (!connected || card) return;
     void recoverMissingCard("openai:set_globals");
   };
