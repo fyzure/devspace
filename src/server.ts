@@ -1050,6 +1050,7 @@ export function createMcpServer(
         ui: {
           visibility: ["app"],
         },
+        "openai/widgetAccessible": true,
       },
       annotations: { readOnlyHint: true },
     },
@@ -1102,6 +1103,7 @@ export function createMcpServer(
         ui: {
           visibility: ["app"],
         },
+        "openai/widgetAccessible": true,
       },
       annotations: { readOnlyHint: true },
     },

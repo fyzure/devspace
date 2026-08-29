@@ -78,9 +78,11 @@ test("widget cards are snapshotted locally and recoverable by card id", async (t
   const listed = await context.client.listTools();
   const restoreTool = listed.tools.find((tool) => tool.name === "get_card_snapshot");
   assert.ok(restoreTool);
-  assert.deepEqual((restoreTool._meta as Record<string, unknown> | undefined)?.ui, {
+  const restoreMeta = restoreTool._meta as Record<string, unknown> | undefined;
+  assert.deepEqual(restoreMeta?.ui, {
     visibility: ["app"],
   });
+  assert.equal(restoreMeta?.["openai/widgetAccessible"], true);
 
   const opened = await callOpen(context.client, context.project, "chat-card-store");
   const openedStructured = structuredContent(opened);

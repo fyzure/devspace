@@ -38,6 +38,7 @@ import {
   getToolHeaderSummary,
   type ToolDisplay,
 } from "./tool-display.js";
+import { isChatGPTHost, isOpenAIWebSandboxHost } from "./openai-host.js";
 import { FilteredPostMessageTransport } from "./post-message-transport.js";
 import "./workspace-app.css";
 
@@ -65,6 +66,8 @@ let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
 let openWorkspaceInstructionKey: string | null = null;
 let showAvailableWorkspaceInstructions = false;
+let openAILegacyRestoreTimer: number | null = null;
+let openAILegacyRestoreAttempt = 0;
 type StoredCardRestoreOutcome = "restored" | "missing" | "waiting" | "failed";
 interface StoredCardRestoreFlight {
   key: string;
@@ -82,7 +85,7 @@ if (!maybeAppRoot) {
 const appRoot = maybeAppRoot;
 
 const CARD_PROBE_PREFIX = "[DevSpace card-probe]";
-const CARD_PROBE_BUILD = "card-race-v7";
+const CARD_PROBE_BUILD = "card-race-v8";
 
 void boot();
 
@@ -93,21 +96,36 @@ async function boot(): Promise<void> {
 
   const restoreFromOpenAIGlobals = () => {
     logCardProbe("openai:set_globals", { cardAlreadyPresent: Boolean(card) });
-    if (!connected || card) return;
     if (mode === "openai-legacy") {
-      if (restoreHostCard()) render();
+      syncOpenAILegacyHostContext();
+      if (!connected) return;
+      void recoverOpenAILegacyCard("openai:set_globals");
       return;
     }
+    if (!connected || card) return;
     void recoverMissingCard("openai:set_globals");
   };
   const onVisibilityChange = () => {
     logCardProbe("visibility-change");
+    if (mode !== "openai-legacy" || document.visibilityState !== "visible") return;
+    syncOpenAILegacyHostContext();
+    if (card) return;
+    void recoverOpenAILegacyCard("visibility-change").then((restored) => {
+      if (!restored) scheduleOpenAILegacyRestore();
+    });
   };
   const onPageHide = (event: PageTransitionEvent) => {
     logCardProbe("pagehide", { persisted: event.persisted });
+    if (mode === "openai-legacy") clearOpenAILegacyRestoreTimer();
   };
   const onPageShow = (event: PageTransitionEvent) => {
     logCardProbe("pageshow", { persisted: event.persisted });
+    if (mode !== "openai-legacy") return;
+    syncOpenAILegacyHostContext();
+    if (card) return;
+    void recoverOpenAILegacyCard("pageshow").then((restored) => {
+      if (!restored) scheduleOpenAILegacyRestore();
+    });
   };
   window.addEventListener("openai:set_globals", restoreFromOpenAIGlobals, { passive: true });
   document.addEventListener("visibilitychange", onVisibilityChange, { passive: true });
@@ -116,7 +134,8 @@ async function boot(): Promise<void> {
 
   if (mode === "openai-legacy") {
     connected = true;
-    const restored = restoreHostCard();
+    syncOpenAILegacyHostContext();
+    const restored = await recoverOpenAILegacyCard("openai-legacy-ready");
     logCardProbe("openai-legacy-ready", { restored });
     if (!restored) scheduleOpenAILegacyRestore();
     render();
@@ -199,6 +218,7 @@ async function boot(): Promise<void> {
     document.removeEventListener("visibilitychange", onVisibilityChange);
     window.removeEventListener("pagehide", onPageHide);
     window.removeEventListener("pageshow", onPageShow);
+    clearOpenAILegacyRestoreTimer();
     unmountPayload();
     return {};
   };
@@ -241,9 +261,15 @@ function widgetMode(): "mcp-app" | "openai-legacy" {
   // cannot tear the iframe down during ui/initialize.
   if (openAIWidgetBridge()) return "openai-legacy";
 
+  // ChatGPT renders connector widgets inside a first-party sandbox origin.
+  // On a cold mount that document can exist before window.openai is injected;
+  // identifying the sandbox itself avoids racing into an MCP Apps handshake
+  // that the ChatGPT bridge is not ready to serve yet.
+  if (isOpenAIWebSandboxHost(window.location.hostname)) return "openai-legacy";
+
   try {
     const referrerHost = new URL(document.referrer).hostname.toLowerCase();
-    if (referrerHost === "chatgpt.com" || referrerHost.endsWith(".chatgpt.com")) {
+    if (isChatGPTHost(referrerHost)) {
       return "openai-legacy";
     }
   } catch {
@@ -253,16 +279,114 @@ function widgetMode(): "mcp-app" | "openai-legacy" {
   return "mcp-app";
 }
 
-function scheduleOpenAILegacyRestore(attempt = 0): void {
-  if (card || attempt >= 40) return;
-  window.setTimeout(() => {
+function clearOpenAILegacyRestoreTimer(): void {
+  if (openAILegacyRestoreTimer === null) return;
+  window.clearTimeout(openAILegacyRestoreTimer);
+  openAILegacyRestoreTimer = null;
+}
+
+function scheduleOpenAILegacyRestore(): void {
+  if (card || openAILegacyRestoreTimer !== null) return;
+
+  const delay = openAILegacyRestoreAttempt < 40 ? 50 : 500;
+  openAILegacyRestoreTimer = window.setTimeout(() => {
+    openAILegacyRestoreTimer = null;
     if (card) return;
-    if (restoreHostCard()) {
-      render();
-      return;
+
+    openAILegacyRestoreAttempt += 1;
+    syncOpenAILegacyHostContext();
+    void recoverOpenAILegacyCard("openai-legacy-retry").then((restored) => {
+      if (!restored) scheduleOpenAILegacyRestore();
+    });
+  }, delay);
+}
+
+function syncOpenAILegacyHostContext(): void {
+  const bridge = openAIWidgetBridge();
+  if (!bridge) return;
+
+  if (bridge.theme === "light" || bridge.theme === "dark") {
+    hostContext = {
+      ...hostContext,
+      theme: bridge.theme,
+    };
+  }
+  applyHostContext();
+}
+
+async function recoverOpenAILegacyCard(trigger: string): Promise<boolean> {
+  syncOpenAILegacyHostContext();
+  if (restoreHostCard()) {
+    clearOpenAILegacyRestoreTimer();
+    openAILegacyRestoreAttempt = 0;
+    render();
+    return true;
+  }
+
+  const bridge = openAIWidgetBridge();
+  const reference = cardReferenceFromOpenAIHost(bridge);
+  if (!bridge?.callTool || !reference) {
+    logCardProbe("openai-legacy-restore-waiting", {
+      trigger,
+      bridgePresent: Boolean(bridge),
+      callToolAvailable: typeof bridge?.callTool === "function",
+      cardId: reference?.cardId,
+    });
+    return false;
+  }
+
+  try {
+    const result = await bridge.callTool("get_card_snapshot", {
+      cardId: reference.cardId,
+    });
+    const structured = getStructuredContent<{
+      cardId?: string;
+      tool?: string;
+      card?: unknown;
+    }>(result);
+    const candidate = probeRecord(structured?.card);
+    const candidateTool = candidate?.tool;
+
+    if (
+      result.isError
+      || !candidate
+      || !isToolName(candidateTool)
+      || !isToolResultCard(candidate)
+    ) {
+      logCardProbe("openai-legacy-store-miss", {
+        trigger,
+        cardId: reference.cardId,
+        isError: result.isError === true,
+        structuredKeys: probeKeys(structured),
+      });
+      return false;
     }
-    scheduleOpenAILegacyRestore(attempt + 1);
-  }, 50);
+
+    card = candidate as unknown as ToolResultCard;
+    cardOrigin = "store";
+    expanded = isInitiallyExpandedCard(card);
+    reviewFilesExpanded = false;
+    openWorkspaceInstructionKey = null;
+    showAvailableWorkspaceInstructions = false;
+    errorMessage = null;
+    clearOpenAILegacyRestoreTimer();
+    openAILegacyRestoreAttempt = 0;
+    logCardProbe("openai-legacy-store-hit", {
+      trigger,
+      tool: card.tool,
+      cardId: card.cardId,
+      referenceSource: reference.source,
+    });
+    render();
+    return true;
+  } catch (restoreError) {
+    logCardProbe("openai-legacy-store-failed", {
+      trigger,
+      cardId: reference.cardId,
+      error: restoreError instanceof Error ? restoreError.message : String(restoreError),
+    });
+    return false;
+  }
 }
 
 function restoreHostCard(): boolean {

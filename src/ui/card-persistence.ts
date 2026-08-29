@@ -1,3 +1,4 @@
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   isToolName,
   isToolResultCard,
@@ -8,9 +9,11 @@ const PERSISTED_CARD_KEY = "devspaceCard";
 const PERSISTED_CARD_VERSION = 1;
 
 export interface OpenAIWidgetStateBridge {
+  theme?: "light" | "dark";
   toolOutput?: unknown;
   toolResponseMetadata?: unknown;
   widgetState?: unknown;
+  callTool?: (name: string, arguments_: Record<string, unknown>) => Promise<CallToolResult>;
   // Kept for host capability diagnostics only. DevSpace deliberately treats
   // ChatGPT widget state as read-only: authoritative card persistence lives in
   // the server-side card store, avoiding host-side widget_state write races.
