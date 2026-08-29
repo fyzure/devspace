@@ -57,6 +57,11 @@ const migrations: Migration[] = [
     name: "unique-card-snapshot-invocations",
     up: migrateUniqueCardSnapshotInvocations,
   },
+  {
+    version: 11,
+    name: "non-unique-card-snapshot-invocations",
+    up: migrateNonUniqueCardSnapshotInvocations,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -300,6 +305,15 @@ function migrateUniqueCardSnapshotInvocations(sqlite: Database.Database): void {
     drop index if exists card_snapshots_invocation_idx;
 
     create unique index if not exists card_snapshots_invocation_idx
+      on card_snapshots(conversation_scope_id, request_id);
+  `);
+}
+
+function migrateNonUniqueCardSnapshotInvocations(sqlite: Database.Database): void {
+  sqlite.exec(`
+    drop index if exists card_snapshots_invocation_idx;
+
+    create index if not exists card_snapshots_invocation_idx
       on card_snapshots(conversation_scope_id, request_id);
   `);
 }

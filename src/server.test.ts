@@ -41,6 +41,29 @@ test("workspace app resource declares its dedicated public origin", async (t) =>
   assert.deepEqual(ui?.csp?.connectDomains, [origin]);
 });
 
+test("ChatGPT compatibility resource uses the legacy Skybridge contract", async (t) => {
+  const context = await fixture(t);
+  const listed = await context.client.listResources();
+  const resource = listed.resources.find((entry) =>
+    entry.uri === "ui://devspace/workspace-app/openai-v1.html"
+  );
+  assert.ok(resource);
+  assert.equal(resource.mimeType, "text/html+skybridge");
+
+  const origin = new URL(context.config.publicBaseUrl).origin;
+  assert.deepEqual(resource._meta?.["openai/widgetCSP"], {
+    connect_domains: [origin],
+    resource_domains: [origin],
+  });
+  assert.equal(resource._meta?.["openai/widgetDomain"], origin);
+
+  const read = await context.client.readResource({
+    uri: "ui://devspace/workspace-app/openai-v1.html",
+  });
+  assert.equal(read.contents[0]?.mimeType, "text/html+skybridge");
+  assert.match(String(read.contents[0] && "text" in read.contents[0] ? read.contents[0].text : ""), /openai-legacy/);
+});
+
 test("widget tools expose both MCP Apps and ChatGPT-compatible resource metadata", async (t) => {
   const context = await fixture(t);
   const listed = await context.client.listTools();
@@ -48,7 +71,7 @@ test("widget tools expose both MCP Apps and ChatGPT-compatible resource metadata
   assert.ok(openWorkspace);
 
   const meta = openWorkspace._meta as Record<string, unknown> | undefined;
-  assert.equal(meta?.["openai/outputTemplate"], "ui://devspace/workspace-app/v2.html");
+  assert.equal(meta?.["openai/outputTemplate"], "ui://devspace/workspace-app/openai-v1.html");
   assert.equal(meta?.["ui/resourceUri"], "ui://devspace/workspace-app/v2.html");
   assert.deepEqual(meta?.ui, {
     resourceUri: "ui://devspace/workspace-app/v2.html",

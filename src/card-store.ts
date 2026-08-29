@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import { cardSnapshots, type CardSnapshotRow } from "./db/schema.js";
 
@@ -66,14 +66,13 @@ export class SqliteCardStore implements CardStore {
     card: Record<string, unknown>;
   }): StoredCardSnapshot {
     const save = this.database.sqlite.transaction(() => {
-      const existing = input.conversationScopeId !== undefined && input.requestId !== undefined
-        ? this.getByInvocation({
-            conversationScopeId: input.conversationScopeId,
-            requestId: input.requestId,
-          })
-        : undefined;
-      const id = existing?.id ?? randomUUID();
-      const createdAt = existing?.createdAt ?? new Date().toISOString();
+      // JSON-RPC request ids are only required to correlate a request with its
+      // response on a connection. Stateless MCP clients may reuse the same id
+      // for later tool calls, so it is not a stable widget identity. Always
+      // allocate a fresh card id and keep request_id only as a best-effort
+      // restore hint when the host has not surfaced the card id yet.
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
       const card = {
         ...input.card,
         cardId: id,
@@ -116,7 +115,7 @@ export class SqliteCardStore implements CardStore {
         eq(cardSnapshots.conversationScopeId, input.conversationScopeId),
         eq(cardSnapshots.requestId, encodeRequestId(input.requestId)),
       ))
-      .orderBy(desc(cardSnapshots.createdAt))
+      .orderBy(desc(cardSnapshots.createdAt), desc(sql`rowid`))
       .limit(1)
       .get();
 

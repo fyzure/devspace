@@ -91,8 +91,8 @@ test("card snapshots are recoverable by conversation-scoped tool invocation id",
   }
 });
 
-test("card snapshot saves are idempotent for the same conversation-scoped invocation", async () => {
-  const root = await mkdtemp(join(tmpdir(), "devspace-card-invocation-idempotent-test-"));
+test("reused stateless request ids create distinct cards and restore the newest invocation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-card-reused-request-id-test-"));
   try {
     const store = new SqliteCardStore(root);
     try {
@@ -111,9 +111,9 @@ test("card snapshot saves are idempotent for the same conversation-scoped invoca
         card: { tool: "read", path: "second.md" },
       });
 
-      assert.equal(second.id, first.id);
-      assert.equal(second.card.cardId, first.id);
-      assert.equal(second.createdAt, first.createdAt);
+      assert.notEqual(second.id, first.id);
+      assert.equal(first.card.cardId, first.id);
+      assert.equal(second.card.cardId, second.id);
       assert.equal(second.card.path, "second.md");
       assert.deepEqual(
         store.getByInvocation({
@@ -122,6 +122,8 @@ test("card snapshot saves are idempotent for the same conversation-scoped invoca
         }),
         second,
       );
+      assert.equal(store.get(first.id)?.card.path, "first.md");
+      assert.equal(store.get(second.id)?.card.path, "second.md");
     } finally {
       store.close();
     }

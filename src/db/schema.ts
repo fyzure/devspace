@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const workspaceSessions = sqliteTable(
   "workspace_sessions",
@@ -154,7 +154,7 @@ export const cardSnapshots = sqliteTable(
   },
   (table) => [
     index("card_snapshots_conversation_idx").on(table.conversationScopeId, table.createdAt),
-    uniqueIndex("card_snapshots_invocation_idx").on(table.conversationScopeId, table.requestId),
+    index("card_snapshots_invocation_idx").on(table.conversationScopeId, table.requestId),
     index("card_snapshots_workspace_idx").on(table.workspaceId, table.createdAt),
   ],
 );

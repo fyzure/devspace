@@ -68,6 +68,8 @@ import {
 
 const PROCESS_HANDOFF_MS = 2_000;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app/v2.html";
+const OPENAI_WORKSPACE_APP_URI = "ui://devspace/workspace-app/openai-v1.html";
+const OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -171,13 +173,12 @@ function toolWidgetDescriptorMeta(
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
-      // ChatGPT Web currently exposes the MCP Apps resource URI but may route
-      // the iframe through a host bridge that is missing optional Apps host
-      // methods such as notifyMcpAppsHostContext/setWidgetView. Keep the
-      // legacy OpenAI template pointer as a compatibility alias to the exact
-      // same v2 resource so ChatGPT can select its fully-supported bridge,
-      // while standards-compliant hosts continue using ui.resourceUri.
-      "openai/outputTemplate": WORKSPACE_APP_URI,
+      // Keep ChatGPT's legacy template on a separate Skybridge resource. Some
+      // ChatGPT Web builds can mount the MCP Apps resource before their host
+      // bridge has installed notifyMcpAppsHostContext/setWidgetView, which
+      // tears down the iframe before tool output arrives. Standards-compliant
+      // MCP Apps hosts continue using ui.resourceUri above.
+      "openai/outputTemplate": OPENAI_WORKSPACE_APP_URI,
     },
   };
 }
@@ -513,7 +514,10 @@ function assetUrl(baseUrl: string, assetPath: string): string {
   return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
 }
 
-function workspaceAppHtml(config: ServerConfig): string {
+function workspaceAppHtml(
+  config: ServerConfig,
+  mode: "mcp-app" | "openai-legacy" = "mcp-app",
+): string {
   const baseUrl = assetBaseUrl(config);
   const entry = getWorkspaceAppManifestEntry();
   const stylesheets = (entry.css ?? [])
@@ -522,6 +526,9 @@ function workspaceAppHtml(config: ServerConfig): string {
         `    <link rel="stylesheet" crossorigin href="${assetUrl(baseUrl, stylesheet)}" />`,
     )
     .join("\n");
+  const modeMeta = mode === "openai-legacy"
+    ? `    <meta name="devspace-widget-mode" content="openai-legacy" />\n`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -529,7 +536,7 @@ function workspaceAppHtml(config: ServerConfig): string {
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DevSpace Workspace</title>
-    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
+${modeMeta}    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
 ${stylesheets}
   </head>
   <body>
@@ -562,6 +569,17 @@ function appResourceUiMeta(config: ServerConfig): {
   return {
     domain: appDomain(config),
     csp: appCsp(config),
+  };
+}
+
+function openAiLegacyResourceMeta(config: ServerConfig): Record<string, unknown> {
+  const origin = appDomain(config);
+  return {
+    "openai/widgetCSP": {
+      connect_domains: [origin],
+      resource_domains: [origin],
+    },
+    "openai/widgetDomain": origin,
   };
 }
 
@@ -984,6 +1002,29 @@ export function createMcpServer(
             _meta: {
               ui: appResourceUiMeta(config),
             },
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerResource(
+    "DevSpace ChatGPT Card v1",
+    OPENAI_WORKSPACE_APP_URI,
+    {
+      description: "ChatGPT compatibility card for DevSpace tool results.",
+      mimeType: OPENAI_WIDGET_MIME_TYPE,
+      _meta: openAiLegacyResourceMeta(config),
+    },
+    async () => {
+      await assertWorkspaceAppAssets();
+      return {
+        contents: [
+          {
+            uri: OPENAI_WORKSPACE_APP_URI,
+            mimeType: OPENAI_WIDGET_MIME_TYPE,
+            text: workspaceAppHtml(config, "openai-legacy"),
+            _meta: openAiLegacyResourceMeta(config),
           },
         ],
       };

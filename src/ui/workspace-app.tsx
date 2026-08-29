@@ -82,22 +82,22 @@ if (!maybeAppRoot) {
 const appRoot = maybeAppRoot;
 
 const CARD_PROBE_PREFIX = "[DevSpace card-probe]";
-const CARD_PROBE_BUILD = "card-race-v5";
+const CARD_PROBE_BUILD = "card-race-v7";
 
 void boot();
 
 async function boot(): Promise<void> {
-  logCardProbe("boot");
+  const mode = widgetMode();
+  logCardProbe("boot", { widgetMode: mode });
   render();
-
-  app = new App(
-    { name: "devspace-tool-cards", version: "0.6.0-mcp-apps-only" },
-    {},
-  );
 
   const restoreFromOpenAIGlobals = () => {
     logCardProbe("openai:set_globals", { cardAlreadyPresent: Boolean(card) });
     if (!connected || card) return;
+    if (mode === "openai-legacy") {
+      if (restoreHostCard()) render();
+      return;
+    }
     void recoverMissingCard("openai:set_globals");
   };
   const onVisibilityChange = () => {
@@ -113,6 +113,20 @@ async function boot(): Promise<void> {
   document.addEventListener("visibilitychange", onVisibilityChange, { passive: true });
   window.addEventListener("pagehide", onPageHide, { passive: true });
   window.addEventListener("pageshow", onPageShow, { passive: true });
+
+  if (mode === "openai-legacy") {
+    connected = true;
+    const restored = restoreHostCard();
+    logCardProbe("openai-legacy-ready", { restored });
+    if (!restored) scheduleOpenAILegacyRestore();
+    render();
+    return;
+  }
+
+  app = new App(
+    { name: "devspace-tool-cards", version: "0.7.0-hybrid-host" },
+    {},
+  );
 
   app.ontoolresult = (result) => {
     const structuredContent = getStructuredContent<Partial<ToolResultCard>>(result);
@@ -216,6 +230,41 @@ function openAIWidgetBridge(): OpenAIWidgetStateBridge | undefined {
   return (window as Window & { openai?: OpenAIWidgetStateBridge }).openai;
 }
 
+function widgetMode(): "mcp-app" | "openai-legacy" {
+  const configured = document
+    .querySelector<HTMLMetaElement>('meta[name="devspace-widget-mode"]')
+    ?.content;
+  if (configured === "openai-legacy") return "openai-legacy";
+
+  // The legacy ChatGPT bridge exposes window.openai. Prefer it before
+  // initiating an MCP Apps handshake so a partially initialized ChatGPT host
+  // cannot tear the iframe down during ui/initialize.
+  if (openAIWidgetBridge()) return "openai-legacy";
+
+  try {
+    const referrerHost = new URL(document.referrer).hostname.toLowerCase();
+    if (referrerHost === "chatgpt.com" || referrerHost.endsWith(".chatgpt.com")) {
+      return "openai-legacy";
+    }
+  } catch {
+    // Empty or non-URL referrers are normal in sandboxed MCP hosts.
+  }
+
+  return "mcp-app";
+}
+
+function scheduleOpenAILegacyRestore(attempt = 0): void {
+  if (card || attempt >= 40) return;
+  window.setTimeout(() => {
+    if (card) return;
+    if (restoreHostCard()) {
+      render();
+      return;
+    }
+    scheduleOpenAILegacyRestore(attempt + 1);
+  }, 50);
+}
+
 function restoreHostCard(): boolean {
   const bridge = openAIWidgetBridge();
   const restored = persistedCardFromOpenAIHost(bridge);
@@ -294,10 +343,13 @@ function restoreStoredCard(
   const bridge = openAIWidgetBridge();
   const reference = cardReferenceFromOpenAIHost(bridge);
   const invocation = cardInvocationFromHostContext(hostContext ?? app?.getHostContext());
-  const restoreKey = invocation
-    ? invocationRestoreKey(invocation.requestId)
-    : reference
-      ? cardRestoreKey(reference.cardId)
+  // Prefer the concrete card id whenever ChatGPT has surfaced one. Its
+  // stateless MCP transport can reuse JSON-RPC request ids (for example `0`)
+  // across distinct tool calls, so an invocation id is only a fallback hint.
+  const restoreKey = reference
+    ? cardRestoreKey(reference.cardId)
+    : invocation
+      ? invocationRestoreKey(invocation.requestId)
       : undefined;
 
   if (!restoreKey) {
@@ -330,14 +382,14 @@ function restoreStoredCard(
   const restoreToken = Symbol(restoreKey);
   const restorePromise = (async () => {
     try {
-      const result = invocation
+      const result = reference
         ? await app!.callServerTool({
-            name: "get_card_snapshot_by_invocation",
-            arguments: { requestId: invocation!.requestId },
-          })
-        : await app!.callServerTool({
             name: "get_card_snapshot",
             arguments: { cardId: reference!.cardId },
+          })
+        : await app!.callServerTool({
+            name: "get_card_snapshot_by_invocation",
+            arguments: { requestId: invocation!.requestId },
           });
       const structured = getStructuredContent<{
         hit?: boolean;
@@ -435,11 +487,10 @@ function currentInvocationKey(): string | undefined {
 }
 
 function currentRestoreKey(): string | undefined {
-  const invocationKey = currentInvocationKey();
-  if (invocationKey) return invocationKey;
-
   const reference = cardReferenceFromOpenAIHost(openAIWidgetBridge());
-  return reference ? cardRestoreKey(reference.cardId) : undefined;
+  if (reference) return cardRestoreKey(reference.cardId);
+
+  return currentInvocationKey();
 }
 
 function invocationRestoreKey(requestId: string | number): string {
