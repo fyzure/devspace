@@ -155,13 +155,19 @@ detached process. Do not detach from ordinary `bash` on Windows.
 
 ## Widgets
 
-`DEVSPACE_WIDGETS` controls ChatGPT Apps iframe usage.
+`DEVSPACE_WIDGETS` controls whether DevSpace attaches ChatGPT Apps UI metadata.
+The server keeps accepting the historical `full` and `changes` values for
+backward compatibility; both now mean the same thing.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `full` | Default. Enables widget UI for `open_workspace` and `show_changes`. |
+| `changes` | Backward-compatible alias for `full`. |
+| `off` | Disables widget UI metadata. `show_changes` remains available as a normal MCP tool. |
+
+Ordinary read, write, edit, search, shell, and process tools never carry widget
+metadata. `show_changes` is always exposed; the UI setting only controls whether
+`open_workspace` and `show_changes` reference the workspace/review card resource.
 
 ## Skills
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
-import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import { createReviewCheckpointManager, readReviewRef } from "./review-checkpoints.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,10 +44,60 @@ test("show_changes reports and advances the last-shown checkpoint", async (t) =>
     markReviewed: true,
   });
   assert.equal(markedReviewed.summary.files, 2);
+  assert.match(markedReviewed.reviewRef, /^[0-9a-f]{40,64}$/);
+
+  const restored = await manager.reviewByRef({
+    workspaceId: "ws_incremental",
+    root,
+    reviewRef: markedReviewed.reviewRef,
+  });
+  assert.deepEqual(restored.summary, markedReviewed.summary);
+  assert.deepEqual(restored.files, markedReviewed.files);
+  assert.equal(restored.patch, markedReviewed.patch);
 
   const afterReviewed = await manager.reviewChanges({ workspaceId: "ws_incremental", root });
   assert.equal(afterReviewed.summary.files, 0);
   assert.equal(afterReviewed.patch, "");
+});
+
+test("historical review refs survive later reviews and manager restarts", async (t) => {
+  const root = await committedRepository(t);
+  const manager = createReviewCheckpointManager();
+  await manager.initializeWorkspace({ workspaceId: "ws_history", root });
+
+  await writeFile(join(root, "README.md"), "hello\nfirst\n");
+  const first = await manager.reviewChanges({ workspaceId: "ws_history", root });
+
+  await writeFile(join(root, "README.md"), "hello\nfirst\nsecond\n");
+  const second = await manager.reviewChanges({ workspaceId: "ws_history", root });
+  assert.notEqual(first.reviewRef, second.reviewRef);
+
+  const restarted = createReviewCheckpointManager();
+  const restoredFirst = await restarted.reviewByRef({
+    workspaceId: "ws_history",
+    root,
+    reviewRef: first.reviewRef,
+  });
+  assert.deepEqual(restoredFirst.summary, first.summary);
+  assert.equal(restoredFirst.patch, first.patch);
+  assert.match(restoredFirst.patch, /\+first/);
+  assert.doesNotMatch(restoredFirst.patch, /\+second/);
+});
+
+test("review refs are scoped to the workspace review history", async (t) => {
+  const root = await committedRepository(t);
+  const manager = createReviewCheckpointManager();
+  await manager.initializeWorkspace({ workspaceId: "ws_scoped", root });
+
+  const head = await gitOutput(root, ["rev-parse", "HEAD"]);
+  await assert.rejects(
+    () => manager.reviewByRef({ workspaceId: "ws_scoped", root, reviewRef: head }),
+    /Unknown review reference/,
+  );
+  await assert.rejects(
+    () => readReviewRef(root, head),
+    /Unknown DevSpace review reference/,
+  );
 });
 
 test("review checkpoints survive a manager restart", async (t) => {
@@ -227,4 +277,9 @@ async function deleteReviewRef(
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
+}
+
+async function gitOutput(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout.trim();
 }

@@ -7,7 +7,6 @@ import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SqliteCardStore } from "./card-store.js";
 import { loadConfig, type ServerConfig } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
@@ -20,7 +19,7 @@ import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
 
-test("workspace app resource declares its dedicated public origin", async (t) => {
+test("workspace app resource declares its CSP", async (t) => {
   const context = await fixture(t);
   const listed = await context.client.listResources();
   const resource = listed.resources.find((entry) =>
@@ -30,58 +29,40 @@ test("workspace app resource declares its dedicated public origin", async (t) =>
 
   const origin = new URL(context.config.publicBaseUrl).origin;
   const ui = resource._meta?.ui as {
-    domain?: unknown;
     csp?: {
       resourceDomains?: unknown;
       connectDomains?: unknown;
     };
   } | undefined;
-  assert.equal(ui?.domain, origin);
   assert.deepEqual(ui?.csp?.resourceDomains, [origin]);
   assert.deepEqual(ui?.csp?.connectDomains, [origin]);
 });
 
-test("widget tools expose both MCP Apps and ChatGPT-compatible resource metadata", async (t) => {
-  const context = await fixture(t);
-  const listed = await context.client.listTools();
-  const openWorkspace = listed.tools.find((tool) => tool.name === "open_workspace");
-  assert.ok(openWorkspace);
+test("UI metadata is limited to workspace and aggregate review", async (t) => {
+  for (const uiEnabled of [true, false]) {
+    await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {
+      const context = await fixture(nested, { uiEnabled });
+      const listed = await context.client.listTools();
+      const toolsWithUi = listed.tools
+        .filter((tool) => Boolean((tool._meta as { ui?: unknown } | undefined)?.ui))
+        .map((tool) => tool.name)
+        .sort();
 
-  const meta = openWorkspace._meta as Record<string, unknown> | undefined;
-  assert.equal(meta?.["openai/outputTemplate"], "ui://devspace/workspace-app/v2.html");
-  assert.equal(meta?.["ui/resourceUri"], "ui://devspace/workspace-app/v2.html");
-  assert.deepEqual(meta?.ui, {
-    resourceUri: "ui://devspace/workspace-app/v2.html",
-    visibility: ["model"],
-  });
-});
+      assert.deepEqual(toolsWithUi, uiEnabled ? ["open_workspace", "show_changes"] : []);
+      assert.ok(listed.tools.some((tool) => tool.name === "show_changes"));
 
-test("widget cards are snapshotted locally and recoverable by card id", async (t) => {
-  const context = await fixture(t);
-  const listed = await context.client.listTools();
-  const restoreTool = listed.tools.find((tool) => tool.name === "get_card_snapshot");
-  assert.ok(restoreTool);
-  assert.deepEqual((restoreTool._meta as Record<string, unknown> | undefined)?.ui, {
-    visibility: ["app"],
-  });
-
-  const opened = await callOpen(context.client, context.project, "chat-card-store");
-  const openedStructured = structuredContent(opened);
-  const cardId = openedStructured.cardId;
-  assert.equal(typeof cardId, "string");
-  assert.equal(responseCard(opened).cardId, cardId);
-
-  const restored = await context.client.callTool({
-    name: "get_card_snapshot",
-    arguments: { cardId },
-  });
-  const restoredStructured = structuredContent(restored);
-  assert.equal(restoredStructured.cardId, cardId);
-  assert.equal(restoredStructured.tool, "open_workspace");
-  const restoredCard = restoredStructured.card as Record<string, unknown>;
-  assert.equal(restoredCard.tool, "open_workspace");
-  assert.equal(restoredCard.workspaceId, openedStructured.workspaceId);
-  assert.equal(restoredCard.cardId, cardId);
+      const openWorkspace = listed.tools.find((tool) => tool.name === "open_workspace");
+      assert.ok(openWorkspace);
+      const meta = openWorkspace._meta as Record<string, unknown> | undefined;
+      assert.equal(meta?.["openai/outputTemplate"], undefined);
+      if (uiEnabled) {
+        assert.deepEqual(meta?.ui, {
+          resourceUri: "ui://devspace/workspace-app/v2.html",
+          visibility: ["model"],
+        });
+      }
+    });
+  }
 });
 
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
@@ -145,6 +126,32 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   assert.ok(Array.isArray(card.agents));
 });
 
+test("show_changes returns a durable reviewRef that reloads the same review", async (t) => {
+  const context = await fixture(t, { git: true });
+  const opened = await callOpen(context.client, context.project, "chat-review-ref");
+  const workspaceId = structuredContent(opened).workspaceId as string;
+
+  await writeFile(join(context.project, "README.md"), "hello\nreviewed change\n");
+
+  const shown = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspaceId },
+  });
+  const shownStructured = structuredContent(shown);
+  assert.equal(shownStructured.workspaceId, workspaceId);
+  assert.match(String(shownStructured.reviewRef), /^[0-9a-f]{40,64}$/);
+  const shownCard = responseCard(shown);
+  assert.match(String((shownCard.payload as { patch?: string } | undefined)?.patch), /reviewed change/);
+
+  const restored = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspaceId },
+    _meta: { "devspace/reviewRef": shownStructured.reviewRef },
+  });
+  assert.equal(structuredContent(restored).reviewRef, shownStructured.reviewRef);
+  assert.deepEqual(responseCard(restored), shownCard);
+});
+
 test("read accepts an advertised leading-tilde skill path", async (t) => {
   const context = await fixture(t);
   const opened = await callOpen(context.client, context.project, "chat-skill-read");
@@ -164,11 +171,6 @@ test("read accepts an advertised leading-tilde skill path", async (t) => {
 
   assert.notEqual(read.isError, true);
   assert.match(responseText(read), /name: devspace-workflow/);
-  const readCard = responseCard(read);
-  assert.equal(typeof readCard.cardId, "string");
-  const readSnapshot = context.cardStore.get(readCard.cardId as string);
-  assert.equal(readSnapshot?.conversationScopeId, "chat-skill-read");
-  assert.equal(typeof readSnapshot?.requestId, "string");
 });
 
 test("full mode hands off tracked commands and recovers their retained results", async (t) => {
@@ -197,7 +199,6 @@ test("full mode hands off tracked commands and recovers their retained results",
   const running = structuredContent(started);
   assert.equal(running.running, true);
   assert.equal(typeof running.sessionId, "number");
-  assert.equal(typeof responseCard(started).cardId, "string");
 
   const listedWhileRunning = await context.client.callTool({
     name: "process_status",
@@ -423,13 +424,11 @@ test("checkout reuse and context suppression survive a registry restart", async 
   await context.close();
 
   const restoredStore = new SqliteWorkspaceStore(context.stateDir);
-  const restoredCardStore = new SqliteCardStore(context.stateDir);
   const restoredServer = createMcpServer(
     context.config,
     new WorkspaceRegistry(context.config, restoredStore),
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
-    restoredCardStore,
     () => [],
     [],
   );
@@ -441,7 +440,6 @@ test("checkout reuse and context suppression survive a registry restart", async 
     restoredClosed = true;
     await restoredClient.close();
     await restoredServer.close();
-    restoredCardStore.close();
     restoredStore.close();
   };
   t.after(closeRestored);
@@ -465,7 +463,6 @@ interface ServerFixture {
   project: string;
   config: ServerConfig;
   stateDir: string;
-  cardStore: SqliteCardStore;
   close: () => Promise<void>;
 }
 
@@ -475,6 +472,7 @@ async function fixture(
     git?: boolean;
     localAgentProviders?: LocalAgentProviderAvailability[] | (() => LocalAgentProviderAvailability[]);
     subagents?: SubagentsConfig;
+    uiEnabled?: boolean;
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -518,9 +516,13 @@ async function fixture(
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",
   });
+  const modeConfig: ServerConfig = {
+    ...loadedConfig,
+    uiEnabled: options.uiEnabled ?? loadedConfig.uiEnabled,
+  };
   const config: ServerConfig = options.localAgentProviders
     ? {
-        ...loadedConfig,
+        ...modeConfig,
         subagents: options.subagents ?? {
           enabled: true,
           providers: initialProviderAvailability.map((provider) => ({
@@ -529,7 +531,7 @@ async function fixture(
           })),
         },
       }
-    : loadedConfig;
+    : modeConfig;
   const resolveProviderAvailability: () => LocalAgentProviderAvailability[] =
     typeof options.localAgentProviders === "function"
       ? options.localAgentProviders
@@ -539,14 +541,12 @@ async function fixture(
     resolveProviderAvailability(),
   );
   const store = new SqliteWorkspaceStore(stateDir);
-  const cardStore = new SqliteCardStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
   const server = createMcpServer(
     config,
     workspaces,
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
-    cardStore,
     resolveLocalAgentProviders,
     [],
   );
@@ -563,7 +563,6 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
-    cardStore.close();
     store.close();
   };
 
@@ -572,7 +571,7 @@ async function fixture(
     await rm(root, { recursive: true, force: true });
   });
 
-  return { client, project, config, stateDir, cardStore, close };
+  return { client, project, config, stateDir, close };
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {

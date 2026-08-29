@@ -7,7 +7,6 @@ import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-
 import { resolveSubagentsConfig, type SubagentsConfig } from "./local-agent-config.js";
 
 export type ToolMode = "minimal" | "full" | "codex";
-export type WidgetMode = "off" | "changes" | "full";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 100 * 1024 * 1024;
@@ -20,7 +19,7 @@ export interface ServerConfig {
   allowedHosts: string[];
   publicBaseUrl: string;
   toolMode: ToolMode;
-  widgets: WidgetMode;
+  uiEnabled: boolean;
   stateDir: string;
   remoteCardStore?: {
     baseUrl: string;
@@ -163,9 +162,9 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
   };
 }
 
-function parseWidgetMode(value: string | undefined): WidgetMode {
-  if (!value || value === "full") return "full";
-  if (value === "off" || value === "changes") return value;
+function parseUiEnabled(value: string | undefined): boolean {
+  if (!value || value === "full" || value === "changes") return true;
+  if (value === "off") return false;
 
   throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
@@ -271,7 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
     toolMode: parseToolMode(env),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
+    uiEnabled: parseUiEnabled(env.DEVSPACE_WIDGETS),
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
     remoteCardStore: parseRemoteCardStore(env),
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),

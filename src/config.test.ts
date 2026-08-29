@@ -11,10 +11,10 @@ const baseEnv = {
   DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
 };
 
-assert.equal(loadConfig(baseEnv).widgets, "full");
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).widgets, "changes");
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "full" }).widgets, "full");
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "off" }).widgets, "off");
+assert.equal(loadConfig(baseEnv).uiEnabled, true);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).uiEnabled, true);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "full" }).uiEnabled, true);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "off" }).uiEnabled, false);
 assert.equal(loadConfig(baseEnv).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "minimal" }).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "full" }).toolMode, "full");

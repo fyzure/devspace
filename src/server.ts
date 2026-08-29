@@ -27,7 +27,7 @@ import {
   isArtifactDownloadSupportedPlatform,
   registerArtifactTools,
 } from "./artifact-tools.js";
-import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
+import { loadConfig, type ServerConfig } from "./config.js";
 import {
   createOpenAIIncomingArtifactAdapter,
   type IncomingArtifactAdapter,
@@ -122,22 +122,11 @@ interface DiffStats {
   removals: number;
 }
 
-type ToolWidgetKind =
-  | "workspace"
-  | "read"
-  | "write"
-  | "edit"
-  | "search"
-  | "directory"
-  | "shell"
-  | "show_changes";
-
 interface ToolDefinitionMeta extends Record<string, unknown> {
   ui: {
     resourceUri: string;
     visibility: ["model"];
   };
-  "openai/outputTemplate": string;
 }
 
 type EmptyToolDefinitionMeta = Record<string, unknown> & {
@@ -148,22 +137,8 @@ interface ToolWidgetDescriptorMeta {
   _meta: ToolDefinitionMeta | EmptyToolDefinitionMeta;
 }
 
-function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
-  switch (mode) {
-    case "off":
-      return false;
-    case "changes":
-      return kind === "workspace" || kind === "show_changes";
-    case "full":
-      return true;
-  }
-}
-
-function toolWidgetDescriptorMeta(
-  config: ServerConfig,
-  kind: ToolWidgetKind,
-): ToolWidgetDescriptorMeta {
-  if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
+function workspaceAppDescriptorMeta(config: ServerConfig): ToolWidgetDescriptorMeta {
+  if (!config.uiEnabled) return { _meta: {} };
 
   return {
     _meta: {
@@ -171,13 +146,6 @@ function toolWidgetDescriptorMeta(
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
-      // ChatGPT Web currently exposes the MCP Apps resource URI but may route
-      // the iframe through a host bridge that is missing optional Apps host
-      // methods such as notifyMcpAppsHostContext/setWidgetView. Keep the
-      // legacy OpenAI template pointer as a compatibility alias to the exact
-      // same v2 resource so ChatGPT can select its fully-supported bridge,
-      // while standards-compliant hosts continue using ui.resourceUri.
-      "openai/outputTemplate": WORKSPACE_APP_URI,
     },
   };
 }
@@ -225,9 +193,7 @@ function serverInstructions(config: ServerConfig): string {
     ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
     : "";
   const showChangesInstruction =
-    config.widgets === "changes"
-      ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
-      : "";
+    " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs.";
 
   if (config.toolMode === "codex") {
     return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, and exec_command for inspection, tests, builds, reviews, and other commands. Every tracked command returns a stable sessionId. A running command continues independently after the tool returns; do not restart it. When the final result is needed, call write_stdin with that sessionId. If a prior response was interrupted or the ID was lost, call process_status with the workspaceId and no sessionId to recover recent processes, then inspect the selected result. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
@@ -280,43 +246,6 @@ function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
       ),
     ...extra,
   };
-}
-
-async function saveWidgetCard(
-  config: ServerConfig,
-  cardStore: CardStore,
-  input: {
-    conversationScopeId?: string;
-    requestId?: string | number;
-    workspaceId?: string;
-    tool: string;
-    card: Record<string, unknown>;
-  },
-) {
-  const snapshot = await cardStore.save(input);
-  logEvent(config.logging, "info", "card_store_saved", {
-    cardId: snapshot.id,
-    tool: snapshot.tool,
-    workspaceId: snapshot.workspaceId,
-    conversationScoped: Boolean(snapshot.conversationScopeId),
-  });
-  return snapshot;
-}
-
-async function persistToolCard(
-  config: ServerConfig,
-  cardStore: CardStore,
-  kind: ToolWidgetKind,
-  input: {
-    conversationScopeId?: string;
-    requestId?: string | number;
-    workspaceId?: string;
-    tool: string;
-    card: Record<string, unknown>;
-  },
-): Promise<Record<string, unknown>> {
-  if (!shouldAttachWidget(config.widgets, kind)) return input.card;
-  return (await saveWidgetCard(config, cardStore, input)).card;
 }
 
 const workspaceSkillOutputSchema = z.object({
@@ -430,24 +359,6 @@ function textBlock(text: string): ToolContent {
   return { type: "text", text };
 }
 
-function textSummary(content: ToolContent[]): {
-  lines: number;
-  characters: number;
-} {
-  const text = contentText(content);
-  return {
-    lines: text.length === 0 ? 0 : text.split("\n").length,
-    characters: text.length,
-  };
-}
-
-function contentLineCount(content: string): number {
-  if (content.length === 0) return 0;
-  return content.endsWith("\n")
-    ? content.slice(0, -1).split("\n").length
-    : content.split("\n").length;
-}
-
 function countDiffStats(diff: string | undefined): DiffStats {
   if (!diff) return { additions: 0, removals: 0 };
 
@@ -460,30 +371,6 @@ function countDiffStats(diff: string | undefined): DiffStats {
   }
 
   return { additions, removals };
-}
-
-function newFilePatch(path: string, content: string): string {
-  const lines =
-    content.length === 0
-      ? []
-      : content.endsWith("\n")
-        ? content.slice(0, -1).split("\n")
-        : content.split("\n");
-  const hunkLength = lines.length;
-  const hunkRange = hunkLength === 0 ? "+0,0" : `+1,${hunkLength}`;
-  const body = lines.map((line) => `+${line}`).join("\n");
-
-  return [
-    `diff --git a/${path} b/${path}`,
-    "new file mode 100644",
-    "index 0000000..0000000",
-    "--- /dev/null",
-    `+++ b/${path}`,
-    `@@ -0,0 ${hunkRange} @@`,
-    body,
-  ]
-    .filter((line) => line.length > 0)
-    .join("\n");
 }
 
 function assetBaseUrl(config: ServerConfig): string {
@@ -556,11 +443,9 @@ function appDomain(config: ServerConfig): string {
 }
 
 function appResourceUiMeta(config: ServerConfig): {
-  domain: string;
   csp: ReturnType<typeof appCsp>;
 } {
   return {
-    domain: appDomain(config),
     csp: appCsp(config),
   };
 }
@@ -638,37 +523,11 @@ function shellOutputSchema(): z.ZodRawShape {
   });
 }
 
-async function processToolResponse(
-  config: ServerConfig,
-  cardStore: CardStore,
-  tool: "bash" | "exec_command" | "write_stdin" | "process_status",
-  workspaceId: string,
-  snapshot: ProcessSnapshot,
-  summary: Record<string, unknown>,
-  invocation: {
-    conversationScopeId?: string;
-    requestId?: string | number;
-  },
-) {
+function processToolResponse(snapshot: ProcessSnapshot) {
   const result = processResult(snapshot);
   const content = [textBlock(result)];
-  const outputSummary = textSummary(snapshot.output ? [textBlock(snapshot.output)] : []);
-  const storedCard = await persistToolCard(config, cardStore, "shell", {
-    ...invocation,
-    workspaceId,
-    tool,
-    card: {
-      workspaceId,
-      summary: { ...summary, ...outputSummary },
-      payload: { content },
-    },
-  });
   return {
     content,
-    _meta: {
-      tool,
-      card: storedCard,
-    },
     structuredContent: {
       result,
       sessionId: snapshot.sessionId,
@@ -694,10 +553,8 @@ function registerProcessTools(
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
   processSessions: ProcessSessionManager,
-  cardStore: CardStore,
 ): void {
-  registerAppTool(
-    server,
+  server.registerTool(
     "exec_command",
     {
       title: "Execute command",
@@ -718,10 +575,9 @@ function registerProcessTools(
           .describe("Working directory relative to the workspace root. Defaults to the workspace root."),
       },
       outputSchema: processOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }, { _meta, requestId }) => {
+    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
@@ -746,22 +602,11 @@ function registerProcessTools(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return processToolResponse(config, cardStore, "exec_command", workspaceId, snapshot, {
-        command: cmd,
-        workingDirectory: workingDirectory ?? ".",
-        running: snapshot.running,
-        exitCode: snapshot.exitCode,
-        timedOut: snapshot.timedOut,
-        wallTimeMs: snapshot.wallTimeMs,
-      }, {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-      });
+      return processToolResponse(snapshot);
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     "process_status",
     {
       title: "Inspect processes",
@@ -809,10 +654,9 @@ function registerProcessTools(
           outputPreview: z.string(),
         })).optional(),
       }),
-      ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: PROCESS_STATUS_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId }, { _meta, requestId }) => {
+    async ({ workspaceId, sessionId }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
 
@@ -824,18 +668,7 @@ function registerProcessTools(
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
-        return processToolResponse(config, cardStore, "process_status", workspaceId, snapshot, {
-          sessionId,
-          command: snapshot.command,
-          running: snapshot.running,
-          exitCode: snapshot.exitCode,
-          timedOut: snapshot.timedOut,
-          interrupted: snapshot.interrupted,
-          wallTimeMs: snapshot.wallTimeMs,
-        }, {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-        });
+        return processToolResponse(snapshot);
       }
 
       const processes = processSessions.list(workspaceId);
@@ -863,34 +696,14 @@ function registerProcessTools(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      const storedCard = await persistToolCard(config, cardStore, "shell", {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-        workspaceId,
-        tool: "process_status",
-        card: {
-          workspaceId,
-          summary: {
-            processes: processes.length,
-            running: processes.filter((process) => process.running).length,
-          },
-          payload: { content },
-        },
-      });
-
       return {
         content,
-        _meta: {
-          tool: "process_status",
-          card: storedCard,
-        },
         structuredContent: { result, processes },
       };
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     "write_stdin",
     {
       title: "Write to process",
@@ -904,10 +717,9 @@ function registerProcessTools(
         rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
       },
       outputSchema: processOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId, chars, columns, rows }, { _meta, requestId }) => {
+    async ({ workspaceId, sessionId, chars, columns, rows }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
       const snapshot = await processSessions.write({
@@ -926,17 +738,7 @@ function registerProcessTools(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return processToolResponse(config, cardStore, "write_stdin", workspaceId, snapshot, {
-        sessionId,
-        charactersWritten: chars?.length ?? 0,
-        running: snapshot.running,
-        exitCode: snapshot.exitCode,
-        timedOut: snapshot.timedOut,
-        wallTimeMs: snapshot.wallTimeMs,
-      }, {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-      });
+      return processToolResponse(snapshot);
     },
   );
 }
@@ -946,7 +748,6 @@ export function createMcpServer(
   workspaces: WorkspaceRegistry,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
-  cardStore: CardStore,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
 ): McpServer {
@@ -992,120 +793,6 @@ export function createMcpServer(
 
   registerAppTool(
     server,
-    "get_card_snapshot",
-    {
-      title: "Get saved card",
-      description: "Load a DevSpace card snapshot previously saved on this machine.",
-      inputSchema: {
-        cardId: z.string(),
-      },
-      outputSchema: {
-        cardId: z.string(),
-        tool: z.string(),
-        card: z.record(z.string(), z.unknown()),
-        createdAt: z.string(),
-      },
-      _meta: {
-        ui: {
-          visibility: ["app"],
-        },
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ cardId }) => {
-      const snapshot = await cardStore.get(cardId);
-      logEvent(config.logging, "info", "card_store_read", {
-        cardId,
-        hit: Boolean(snapshot),
-        tool: snapshot?.tool,
-        workspaceId: snapshot?.workspaceId,
-      });
-
-      if (!snapshot) {
-        return {
-          isError: true,
-          content: [textBlock(`Saved card ${cardId} was not found.`)],
-        };
-      }
-
-      return {
-        content: [textBlock(`Loaded saved ${snapshot.tool} card ${snapshot.id}.`)],
-        structuredContent: {
-          cardId: snapshot.id,
-          tool: snapshot.tool,
-          card: snapshot.card,
-          createdAt: snapshot.createdAt,
-        },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    "get_card_snapshot_by_invocation",
-    {
-      title: "Get saved card by invocation",
-      description:
-        "Load the DevSpace card snapshot associated with this conversation and an original tools/call request id.",
-      inputSchema: {
-        requestId: z.union([z.string(), z.number()]),
-      },
-      outputSchema: {
-        hit: z.boolean(),
-        cardId: z.string().optional(),
-        tool: z.string().optional(),
-        card: z.record(z.string(), z.unknown()).optional(),
-        createdAt: z.string().optional(),
-      },
-      _meta: {
-        ui: {
-          visibility: ["app"],
-        },
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ requestId }, { _meta }) => {
-      const conversationScopeId = openAiConversationScopeId(_meta);
-      if (!conversationScopeId) {
-        return {
-          content: [textBlock("No conversation scope is available for card recovery.")],
-          structuredContent: { hit: false },
-        };
-      }
-
-      const snapshot = await cardStore.getByInvocation({
-        conversationScopeId,
-        requestId,
-      });
-      logEvent(config.logging, "info", "card_store_invocation_read", {
-        requestId,
-        hit: Boolean(snapshot),
-        tool: snapshot?.tool,
-        workspaceId: snapshot?.workspaceId,
-      });
-
-      if (!snapshot) {
-        return {
-          content: [textBlock(`No saved card exists for tool invocation ${String(requestId)}.`)],
-          structuredContent: { hit: false },
-        };
-      }
-
-      return {
-        content: [textBlock(`Loaded saved ${snapshot.tool} card ${snapshot.id}.`)],
-        structuredContent: {
-          hit: true,
-          cardId: snapshot.id,
-          tool: snapshot.tool,
-          card: snapshot.card,
-          createdAt: snapshot.createdAt,
-        },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
     "open_workspace",
     {
       title: "Open workspace",
@@ -1129,7 +816,6 @@ export function createMcpServer(
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
       },
       outputSchema: {
-        cardId: z.string(),
         workspaceId: z.string(),
         root: z.string(),
         mode: z.enum(["checkout", "worktree"]),
@@ -1150,12 +836,19 @@ export function createMcpServer(
         agentProviders: z.array(workspaceLocalAgentProviderOutputSchema).optional(),
         agents: z.array(workspaceLocalAgentOutputSchema).optional(),
         skillDiagnostics: z.array(z.unknown()).optional(),
+        review: z.discriminatedUnion("available", [
+          z.object({ available: z.literal(true) }),
+          z.object({
+            available: z.literal(false),
+            reason: z.string(),
+          }),
+        ]),
         instruction: z.string(),
       },
-      ...toolWidgetDescriptorMeta(config, "workspace"),
+      ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, baseRef }, { _meta, requestId }) => {
+    async ({ path, mode, baseRef }, { _meta }) => {
       const startedAt = performance.now();
       const conversationScopeId = openAiConversationScopeId(_meta);
       const {
@@ -1168,12 +861,10 @@ export function createMcpServer(
         { path, mode, baseRef },
         { conversationScopeId },
       );
-      if (config.widgets === "changes") {
-        await reviewCheckpoints.initializeWorkspace({
-          workspaceId: workspace.id,
-          root: workspace.root,
-        });
-      }
+      const review = await reviewCheckpoints.initializeWorkspace({
+        workspaceId: workspace.id,
+        root: workspace.root,
+      });
       const cardSkills = workspace.skills
         .filter((skill) => !skill.disableModelInvocation)
         .map((skill) => ({
@@ -1256,50 +947,42 @@ export function createMcpServer(
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
-      const storedCard = await saveWidgetCard(config, cardStore, {
-        conversationScopeId,
-        requestId,
-        workspaceId: workspace.id,
-        tool: "open_workspace",
-        card: {
-          tool: "open_workspace",
-          workspaceId: workspace.id,
-          root: workspace.root,
-          path: workspace.root,
-          mode: workspace.mode,
-          workspaceReused,
-          includeBootstrapContext,
-          sourceRoot: workspace.sourceRoot,
-          worktree: workspace.worktree,
-          agentsFiles: cardAgentsFiles,
-          availableAgentsFiles: cardAvailableAgentsFiles,
-          skills: cardSkills,
-          agentProviders: cardAgentProviders,
-          agents: cardAgents,
-          instruction: cardInstruction,
-          summary: {
-            mode: workspace.mode,
-            agentsFiles: cardAgentsFiles.length,
-            availableAgentsFiles: cardAvailableAgentsFiles.length,
-            skills: cardSkills.length,
-            agentProviders: cardAgentProviders.length,
-            agents: cardAgents.length,
-          },
-        },
-      });
       return {
         content: resultContent,
         _meta: {
-          tool: "open_workspace",
-          card: storedCard.card,
+          card: {
+            workspaceId: workspace.id,
+            root: workspace.root,
+            path: workspace.root,
+            mode: workspace.mode,
+            workspaceReused,
+            includeBootstrapContext,
+            sourceRoot: workspace.sourceRoot,
+            worktree: workspace.worktree,
+            agentsFiles: cardAgentsFiles,
+            availableAgentsFiles: cardAvailableAgentsFiles,
+            skills: cardSkills,
+            agentProviders: cardAgentProviders,
+            agents: cardAgents,
+            review,
+            instruction: cardInstruction,
+            summary: {
+              mode: workspace.mode,
+              agentsFiles: cardAgentsFiles.length,
+              availableAgentsFiles: cardAvailableAgentsFiles.length,
+              skills: cardSkills.length,
+              agentProviders: cardAgentProviders.length,
+              agents: cardAgents.length,
+            },
+          },
         },
         structuredContent: {
-          cardId: storedCard.id,
           workspaceId: workspace.id,
           root: workspace.root,
           mode: workspace.mode,
           sourceRoot: workspace.sourceRoot,
           worktree: workspace.worktree,
+          review,
           ...(includeBootstrapContext
             ? {
                 agentsFiles: loadedAgentsFiles,
@@ -1316,8 +999,7 @@ export function createMcpServer(
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     "archive_workspace",
     {
       title: "Archive workspace",
@@ -1340,7 +1022,7 @@ export function createMcpServer(
         openWorldHint: true,
       },
     },
-    async ({ workspaceId }, { _meta, requestId }) => {
+    async ({ workspaceId }) => {
       const startedAt = performance.now();
       if (processSessions.hasRunningSessions(workspaceId)) {
         throw new Error(
@@ -1373,8 +1055,7 @@ export function createMcpServer(
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     toolNames.read,
     {
       title: "Read file",
@@ -1413,10 +1094,9 @@ export function createMcpServer(
           .describe("Maximum number of lines to read."),
       },
       outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "read"),
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, ...input }, { _meta, requestId }) => {
+    async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
@@ -1439,11 +1119,6 @@ export function createMcpServer(
       }
       workspaces.markReadPathLoaded(workspace, readPath);
 
-      const summary = {
-        ...textSummary(response.content),
-        offset: input.offset ?? 1,
-        limited: input.limit !== undefined,
-      };
       logToolCall(config, {
         tool: toolNames.read,
         workspaceId,
@@ -1452,25 +1127,8 @@ export function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      const storedCard = await persistToolCard(config, cardStore, "read", {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-        workspaceId,
-        tool: toolNames.read,
-        card: {
-          workspaceId,
-          path: input.path,
-          summary,
-          payload: { content: response.content },
-        },
-      });
-
       return {
         ...response,
-        _meta: {
-          tool: toolNames.read,
-          card: storedCard,
-        },
         structuredContent: {
           result: contentText(response.content),
         },
@@ -1479,8 +1137,7 @@ export function createMcpServer(
   );
 
   if (config.toolMode !== "codex") {
-  registerAppTool(
-    server,
+  server.registerTool(
     toolNames.write,
     {
       title: "Write file",
@@ -1496,10 +1153,9 @@ export function createMcpServer(
         content: z.string().describe("Complete new file content."),
       },
       outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "write"),
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, ...input }, { _meta, requestId }) => {
+    async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
@@ -1517,13 +1173,6 @@ export function createMcpServer(
         return response;
       }
 
-      const patch = newFilePatch(input.path, input.content);
-      const stats = countDiffStats(patch);
-      const summary = {
-        ...stats,
-        lines: contentLineCount(input.content),
-        characters: input.content.length,
-      };
       logToolCall(config, {
         tool: toolNames.write,
         workspaceId,
@@ -1532,28 +1181,8 @@ export function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      const storedCard = await persistToolCard(config, cardStore, "write", {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-        workspaceId,
-        tool: toolNames.write,
-        card: {
-          workspaceId,
-          path: input.path,
-          summary,
-          payload: {
-            content: response.content,
-            patch,
-          },
-        },
-      });
-
       return {
         ...response,
-        _meta: {
-          tool: toolNames.write,
-          card: storedCard,
-        },
         structuredContent: {
           result: contentText(response.content),
         },
@@ -1561,8 +1190,7 @@ export function createMcpServer(
     },
   );
 
-  registerAppTool(
-    server,
+  server.registerTool(
     toolNames.edit,
     {
       title: "Edit file",
@@ -1591,10 +1219,9 @@ export function createMcpServer(
       outputSchema: resultOutputSchema({
         status: z.literal("applied"),
       }),
-      ...toolWidgetDescriptorMeta(config, "edit"),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, ...input }, { _meta, requestId }) => {
+    async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
@@ -1615,10 +1242,6 @@ export function createMcpServer(
       const stats = countDiffStats(
         response.details?.patch ?? response.details?.diff,
       );
-      const summary = {
-        ...stats,
-        editCount: input.edits.length,
-      };
       const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
       const editContent = [textBlock(editResultText)];
       logToolCall(config, {
@@ -1629,28 +1252,8 @@ export function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      const storedCard = await persistToolCard(config, cardStore, "edit", {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-        workspaceId,
-        tool: toolNames.edit,
-        card: {
-          workspaceId,
-          path: input.path,
-          summary,
-          payload: {
-            diff: response.details?.diff,
-            patch: response.details?.patch,
-          },
-        },
-      });
-
       return {
         content: editContent,
-        _meta: {
-          tool: toolNames.edit,
-          card: storedCard,
-        },
         structuredContent: {
           status: "applied",
           result: contentText(editContent),
@@ -1661,8 +1264,7 @@ export function createMcpServer(
   }
 
   if (config.toolMode === "codex") {
-    registerAppTool(
-      server,
+    server.registerTool(
       "apply_patch",
       {
         title: "Apply patch",
@@ -1687,20 +1289,15 @@ export function createMcpServer(
             }),
           ),
         }),
-        ...toolWidgetDescriptorMeta(config, "edit"),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
-      async ({ workspaceId, patch }, { _meta, requestId }) => {
+      async ({ workspaceId, patch }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         const applied = await applyPatch(workspace.root, patch);
         const paths = applied.files.map((file) => file.path).join(", ");
         const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
         const content = [textBlock(result)];
-        const displayPath = applied.files.length === 1
-          ? applied.files[0]?.path
-          : `${applied.files.length} files`;
-
         logToolCall(config, {
           tool: "apply_patch",
           workspaceId,
@@ -1708,30 +1305,8 @@ export function createMcpServer(
           durationMs: Math.round(performance.now() - startedAt),
         });
 
-        const storedCard = await persistToolCard(config, cardStore, "edit", {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-          workspaceId,
-          tool: "apply_patch",
-          card: {
-            workspaceId,
-            path: displayPath,
-            summary: {
-              files: applied.files.length,
-              additions: applied.additions,
-              removals: applied.removals,
-            },
-            files: applied.files,
-            payload: { patch: applied.patch },
-          },
-        });
-
         return {
           content,
-          _meta: {
-            tool: "apply_patch",
-            card: storedCard,
-          },
           structuredContent: {
             result,
             additions: applied.additions,
@@ -1743,8 +1318,7 @@ export function createMcpServer(
     );
   }
 
-  if (config.widgets === "changes") {
-    registerAppTool(
+  registerAppTool(
       server,
       "show_changes",
       {
@@ -1756,18 +1330,30 @@ export function createMcpServer(
             .string()
             .describe(workspaceIdDescription),
         },
-        outputSchema: resultOutputSchema({ cardId: z.string() }),
-        ...toolWidgetDescriptorMeta(config, "show_changes"),
+        outputSchema: resultOutputSchema({
+          workspaceId: z.string(),
+          reviewRef: z.string().regex(/^[0-9a-f]{40,64}$/),
+        }),
+        ...workspaceAppDescriptorMeta(config),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId }, { _meta, requestId }) => {
+      async ({ workspaceId }, { _meta }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
-        const review = await reviewCheckpoints.reviewChanges({
-          workspaceId,
-          root: workspace.root,
-          markReviewed: true,
-        });
+        const reviewRef = typeof _meta?.["devspace/reviewRef"] === "string"
+          ? _meta["devspace/reviewRef"]
+          : undefined;
+        const review = reviewRef
+          ? await reviewCheckpoints.reviewByRef({
+              workspaceId,
+              root: workspace.root,
+              reviewRef,
+            })
+          : await reviewCheckpoints.reviewChanges({
+              workspaceId,
+              root: workspace.root,
+              markReviewed: true,
+            });
 
         const content = [textBlock(review.result)];
         logToolCall(config, {
@@ -1777,40 +1363,29 @@ export function createMcpServer(
           durationMs: Math.round(performance.now() - startedAt),
         });
 
-        const storedCard = await saveWidgetCard(config, cardStore, {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-          workspaceId,
-          tool: "show_changes",
-          card: {
-            tool: "show_changes",
-            workspaceId,
-            summary: review.summary,
-            files: review.files,
-            payload: {
-              patch: review.patch,
-            },
-          },
-        });
-
         return {
           content,
           _meta: {
-            tool: "show_changes",
-            card: storedCard.card,
+            card: {
+              workspaceId,
+              summary: review.summary,
+              files: review.files,
+              payload: {
+                patch: review.patch,
+              },
+            },
           },
           structuredContent: {
+            workspaceId,
+            reviewRef: review.reviewRef,
             result: contentText(content),
-            cardId: storedCard.id,
           },
         };
       },
-    );
-  }
+  );
 
   if (config.toolMode === "full") {
-    registerAppTool(
-      server,
+    server.registerTool(
       toolNames.grep,
       {
         title: "Grep",
@@ -1830,10 +1405,9 @@ export function createMcpServer(
           include: z.string().optional().describe("Optional include glob."),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }, { _meta, requestId }) => {
+      async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
@@ -1851,11 +1425,6 @@ export function createMcpServer(
           return response;
         }
 
-        const summary = {
-          pattern: input.pattern,
-          scope: input.path ?? ".",
-          ...textSummary(response.content),
-        };
         logToolCall(config, {
           tool: toolNames.grep,
           workspaceId,
@@ -1864,25 +1433,8 @@ export function createMcpServer(
           durationMs: Math.round(performance.now() - startedAt),
         });
 
-        const storedCard = await persistToolCard(config, cardStore, "search", {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-          workspaceId,
-          tool: toolNames.grep,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: { content: response.content },
-          },
-        });
-
         return {
           ...response,
-          _meta: {
-            tool: toolNames.grep,
-            card: storedCard,
-          },
           structuredContent: {
             result: contentText(response.content),
           },
@@ -1890,8 +1442,7 @@ export function createMcpServer(
       },
     );
 
-    registerAppTool(
-      server,
+    server.registerTool(
       toolNames.glob,
       {
         title: "Glob",
@@ -1908,10 +1459,9 @@ export function createMcpServer(
             .describe("Optional path scope relative to the workspace root."),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }, { _meta, requestId }) => {
+      async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
@@ -1929,11 +1479,6 @@ export function createMcpServer(
           return response;
         }
 
-        const summary = {
-          pattern: input.pattern,
-          scope: input.path ?? ".",
-          ...textSummary(response.content),
-        };
         logToolCall(config, {
           tool: toolNames.glob,
           workspaceId,
@@ -1942,25 +1487,8 @@ export function createMcpServer(
           durationMs: Math.round(performance.now() - startedAt),
         });
 
-        const storedCard = await persistToolCard(config, cardStore, "search", {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-          workspaceId,
-          tool: toolNames.glob,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: { content: response.content },
-          },
-        });
-
         return {
           ...response,
-          _meta: {
-            tool: toolNames.glob,
-            card: storedCard,
-          },
           structuredContent: {
             result: contentText(response.content),
           },
@@ -1968,8 +1496,7 @@ export function createMcpServer(
       },
     );
 
-    registerAppTool(
-      server,
+    server.registerTool(
       toolNames.ls,
       {
         title: "Ls",
@@ -1986,10 +1513,9 @@ export function createMcpServer(
             ),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "directory"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }, { _meta, requestId }) => {
+      async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         workspaces.resolvePath(workspace, input.path);
@@ -2007,7 +1533,6 @@ export function createMcpServer(
           return response;
         }
 
-        const summary = textSummary(response.content);
         logToolCall(config, {
           tool: toolNames.ls,
           workspaceId,
@@ -2016,25 +1541,8 @@ export function createMcpServer(
           durationMs: Math.round(performance.now() - startedAt),
         });
 
-        const storedCard = await persistToolCard(config, cardStore, "directory", {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-          workspaceId,
-          tool: toolNames.ls,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: { content: response.content },
-          },
-        });
-
         return {
           ...response,
-          _meta: {
-            tool: toolNames.ls,
-            card: storedCard,
-          },
           structuredContent: {
             result: contentText(response.content),
           },
@@ -2044,8 +1552,7 @@ export function createMcpServer(
   }
 
   if (config.toolMode !== "codex") {
-  registerAppTool(
-    server,
+  server.registerTool(
     toolNames.shell,
     {
       title: "Bash",
@@ -2081,10 +1588,9 @@ export function createMcpServer(
           ),
       },
       outputSchema: shellOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, workingDirectory, ...input }, { _meta, requestId }) => {
+    async ({ workspaceId, workingDirectory, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(
@@ -2117,18 +1623,7 @@ export function createMcpServer(
           || snapshot.signal !== undefined
           || (snapshot.exitCode !== undefined && snapshot.exitCode !== 0)
         );
-        const response = await processToolResponse(config, cardStore, "bash", workspaceId, snapshot, {
-          command: input.command,
-          workingDirectory: workingDirectory ?? ".",
-          running: snapshot.running,
-          exitCode: snapshot.exitCode,
-          signal: snapshot.signal,
-          timedOut: snapshot.timedOut,
-          wallTimeMs: snapshot.wallTimeMs,
-        }, {
-          conversationScopeId: openAiConversationScopeId(_meta),
-          requestId,
-        });
+        const response = processToolResponse(snapshot);
 
         logToolCall(config, {
           tool: toolNames.shell,
@@ -2160,11 +1655,6 @@ export function createMcpServer(
         return response;
       }
 
-      const summary = {
-        command: input.command,
-        workingDirectory: workingDirectory ?? ".",
-        ...textSummary(response.content),
-      };
       logToolCall(config, {
         tool: toolNames.shell,
         workspaceId,
@@ -2175,25 +1665,8 @@ export function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      const storedCard = await persistToolCard(config, cardStore, "shell", {
-        conversationScopeId: openAiConversationScopeId(_meta),
-        requestId,
-        workspaceId,
-        tool: toolNames.shell,
-        card: {
-          workspaceId,
-          path: workingDirectory,
-          summary,
-          payload: { content: response.content },
-        },
-      });
-
       return {
         ...response,
-        _meta: {
-          tool: toolNames.shell,
-          card: storedCard,
-        },
         structuredContent: {
           result: contentText(response.content),
         },
@@ -2202,7 +1675,7 @@ export function createMcpServer(
   );
   }
 
-  registerProcessTools(server, config, workspaces, processSessions, cardStore);
+  registerProcessTools(server, config, workspaces, processSessions);
 
   if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
     registerArtifactTools(server, {
@@ -2375,7 +1848,6 @@ export function createServer(
       workspaces,
       reviewCheckpoints,
       processSessions,
-      cardStore,
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
     );

@@ -194,16 +194,17 @@ registered.
 
 By default, `DEVSPACE_WIDGETS=full`.
 
-In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
-and shell tools. The aggregate `show_changes` tool is not exposed by default.
+In that mode, DevSpace attaches widget UI only to `open_workspace` and
+`show_changes`. Ordinary file, edit, search, shell, and process tools remain
+plain MCP tools.
 
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
+Use `DEVSPACE_WIDGETS=off` to disable widget UI metadata. `show_changes` remains
+available either way. The historical `DEVSPACE_WIDGETS=changes` value is still
+accepted and is now equivalent to `full`.
 
-When `show_changes` is exposed, call it exactly once after the final file
-modification in any turn that changes files. It shows the combined changes for
-that turn and advances the review point automatically. Reusing a workspace does
-not change this workflow.
+Call `show_changes` exactly once after the final file modification in any turn
+that changes files. It shows the combined changes for that turn and advances the
+review point automatically. Reusing a workspace does not change this workflow.
 
 ## Shell and Process Sessions
 
