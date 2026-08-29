@@ -99,12 +99,19 @@ async function boot(): Promise<void> {
       syncOpenAILegacyHostContext();
       if (!connected) return;
 
-      const hostCardId = cardReferenceFromOpenAIHost(openAIWidgetBridge())?.cardId;
-      if (card && (!hostCardId || hostCardId === card.cardId)) return;
+      // ChatGPT can update the lightweight card reference independently from
+      // the fully hydrated tool globals. During that window the reference may
+      // temporarily point at another card even though the complete host card
+      // is still the one already rendered. Treat only a fully parsed host card
+      // as evidence that this iframe should switch cards; otherwise noisy
+      // openai:set_globals events would repeatedly tear down heavy payloads and
+      // flash their loading placeholder.
+      const hostCard = persistedCardFromOpenAIHost(openAIWidgetBridge());
+      if (card && (!hostCard || hostCard.cardId === card.cardId)) return;
 
       logCardProbe("openai:set_globals", {
         cardAlreadyPresent: Boolean(card),
-        hostCardId,
+        hostCardId: hostCard?.cardId,
       });
       void recoverOpenAILegacyCard("openai:set_globals");
       return;
