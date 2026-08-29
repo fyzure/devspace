@@ -13,6 +13,25 @@
   --scrollbar-thumb-hover: color-mix(in srgb, var(--color-text-secondary, #a8a8a8) 82%, transparent);
 }
 
+/* The legacy ChatGPT Skybridge exposes the theme before it exposes the MCP
+ * Apps host style variables. Give light mode a complete semantic palette so a
+ * successful retry cannot fall back to the dark defaults above. In MCP Apps
+ * mode applyHostStyleVariables writes inline values on :root, which continue
+ * to take precedence over these stylesheet fallbacks. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-background-primary: #ffffff;
+  --color-background-secondary: #f7f7f8;
+  --color-background-tertiary: #ececf1;
+  --color-border-primary: #d9d9e3;
+  --color-text-primary: #202123;
+  --color-text-secondary: #565869;
+  --color-text-tertiary: #8e8ea0;
+  --color-success-text: #0f8a42;
+  --color-danger-text: #c83232;
+  --color-warning-text: #9a6700;
+}
+
 * {
   box-sizing: border-box;
 }

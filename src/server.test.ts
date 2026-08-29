@@ -73,6 +73,18 @@ test("widget tools expose both MCP Apps and ChatGPT-compatible resource metadata
   });
 });
 
+test("ChatGPT widget tools avoid the MCP Apps resource during legacy host mounts", async (t) => {
+  const context = await fixture(t, { widgetHostFlavor: "openai-legacy" });
+  const listed = await context.client.listTools();
+  const openWorkspace = listed.tools.find((tool) => tool.name === "open_workspace");
+  assert.ok(openWorkspace);
+
+  const meta = openWorkspace._meta as Record<string, unknown> | undefined;
+  assert.equal(meta?.["openai/outputTemplate"], "ui://devspace/workspace-app/openai-v1.html");
+  assert.equal(meta?.["ui/resourceUri"], undefined);
+  assert.equal(meta?.ui, undefined);
+});
+
 test("widget cards are snapshotted locally and recoverable by card id", async (t) => {
   const context = await fixture(t);
   const listed = await context.client.listTools();
@@ -494,6 +506,7 @@ async function fixture(
     git?: boolean;
     localAgentProviders?: LocalAgentProviderAvailability[] | (() => LocalAgentProviderAvailability[]);
     subagents?: SubagentsConfig;
+    widgetHostFlavor?: "standard" | "openai-legacy";
   } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
@@ -568,6 +581,7 @@ async function fixture(
     cardStore,
     resolveLocalAgentProviders,
     [],
+    options.widgetHostFlavor,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-test-client", version: "1.0.0" });

@@ -134,13 +134,21 @@ type ToolWidgetKind =
   | "shell"
   | "show_changes";
 
-interface ToolDefinitionMeta extends Record<string, unknown> {
+type WidgetHostFlavor = "standard" | "openai-legacy";
+
+interface StandardToolDefinitionMeta extends Record<string, unknown> {
   ui: {
     resourceUri: string;
     visibility: ["model"];
   };
   "openai/outputTemplate": string;
 }
+
+interface OpenAiLegacyToolDefinitionMeta extends Record<string, unknown> {
+  "openai/outputTemplate": string;
+}
+
+type ToolDefinitionMeta = StandardToolDefinitionMeta | OpenAiLegacyToolDefinitionMeta;
 
 type EmptyToolDefinitionMeta = Record<string, unknown> & {
   "ui/resourceUri"?: string;
@@ -164,8 +172,22 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
 function toolWidgetDescriptorMeta(
   config: ServerConfig,
   kind: ToolWidgetKind,
+  hostFlavor: WidgetHostFlavor = "standard",
 ): ToolWidgetDescriptorMeta {
   if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
+
+  if (hostFlavor === "openai-legacy") {
+    return {
+      _meta: {
+        // ChatGPT's MCP backend currently advertises MCP Apps metadata before
+        // the Web host has consistently installed the matching bridge methods.
+        // Supplying only the legacy template prevents the first mount from
+        // racing into ui/initialize and being torn down before tool output is
+        // delivered. Other MCP hosts continue to receive ui.resourceUri.
+        "openai/outputTemplate": OPENAI_WORKSPACE_APP_URI,
+      },
+    };
+  }
 
   return {
     _meta: {
@@ -181,6 +203,12 @@ function toolWidgetDescriptorMeta(
       "openai/outputTemplate": OPENAI_WORKSPACE_APP_URI,
     },
   };
+}
+
+function widgetHostFlavorFromUserAgent(userAgent: string | undefined): WidgetHostFlavor {
+  return /^openai-mcp(?:\/|$)/i.test(userAgent?.trim() ?? "")
+    ? "openai-legacy"
+    : "standard";
 }
 
 function devspaceVersion(): string {
@@ -713,6 +741,7 @@ function registerProcessTools(
   workspaces: WorkspaceRegistry,
   processSessions: ProcessSessionManager,
   cardStore: CardStore,
+  widgetHostFlavor: WidgetHostFlavor,
 ): void {
   registerAppTool(
     server,
@@ -736,7 +765,7 @@ function registerProcessTools(
           .describe("Working directory relative to the workspace root. Defaults to the workspace root."),
       },
       outputSchema: processOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
+      ...toolWidgetDescriptorMeta(config, "shell", widgetHostFlavor),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }, { _meta, requestId }) => {
@@ -827,7 +856,7 @@ function registerProcessTools(
           outputPreview: z.string(),
         })).optional(),
       }),
-      ...toolWidgetDescriptorMeta(config, "shell"),
+      ...toolWidgetDescriptorMeta(config, "shell", widgetHostFlavor),
       annotations: PROCESS_STATUS_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, sessionId }, { _meta, requestId }) => {
@@ -922,7 +951,7 @@ function registerProcessTools(
         rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
       },
       outputSchema: processOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
+      ...toolWidgetDescriptorMeta(config, "shell", widgetHostFlavor),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, sessionId, chars, columns, rows }, { _meta, requestId }) => {
@@ -967,6 +996,7 @@ export function createMcpServer(
   cardStore: CardStore,
   resolveLocalAgentProviders: () => LocalAgentProviderStatus[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
+  widgetHostFlavor: WidgetHostFlavor = "standard",
 ): McpServer {
   const server = new McpServer(
     {
@@ -1195,7 +1225,7 @@ export function createMcpServer(
         skillDiagnostics: z.array(z.unknown()).optional(),
         instruction: z.string(),
       },
-      ...toolWidgetDescriptorMeta(config, "workspace"),
+      ...toolWidgetDescriptorMeta(config, "workspace", widgetHostFlavor),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef }, { _meta, requestId }) => {
@@ -1456,7 +1486,7 @@ export function createMcpServer(
           .describe("Maximum number of lines to read."),
       },
       outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "read"),
+      ...toolWidgetDescriptorMeta(config, "read", widgetHostFlavor),
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -1539,7 +1569,7 @@ export function createMcpServer(
         content: z.string().describe("Complete new file content."),
       },
       outputSchema: resultOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "write"),
+      ...toolWidgetDescriptorMeta(config, "write", widgetHostFlavor),
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -1634,7 +1664,7 @@ export function createMcpServer(
       outputSchema: resultOutputSchema({
         status: z.literal("applied"),
       }),
-      ...toolWidgetDescriptorMeta(config, "edit"),
+      ...toolWidgetDescriptorMeta(config, "edit", widgetHostFlavor),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -1730,7 +1760,7 @@ export function createMcpServer(
             }),
           ),
         }),
-        ...toolWidgetDescriptorMeta(config, "edit"),
+        ...toolWidgetDescriptorMeta(config, "edit", widgetHostFlavor),
         annotations: EDIT_TOOL_ANNOTATIONS,
       },
       async ({ workspaceId, patch }, { _meta, requestId }) => {
@@ -1800,7 +1830,7 @@ export function createMcpServer(
             .describe(workspaceIdDescription),
         },
         outputSchema: resultOutputSchema({ cardId: z.string() }),
-        ...toolWidgetDescriptorMeta(config, "show_changes"),
+        ...toolWidgetDescriptorMeta(config, "show_changes", widgetHostFlavor),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId }, { _meta, requestId }) => {
@@ -1873,7 +1903,7 @@ export function createMcpServer(
           include: z.string().optional().describe("Optional include glob."),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
+        ...toolWidgetDescriptorMeta(config, "search", widgetHostFlavor),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -1951,7 +1981,7 @@ export function createMcpServer(
             .describe("Optional path scope relative to the workspace root."),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "search"),
+        ...toolWidgetDescriptorMeta(config, "search", widgetHostFlavor),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -2029,7 +2059,7 @@ export function createMcpServer(
             ),
         },
         outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "directory"),
+        ...toolWidgetDescriptorMeta(config, "directory", widgetHostFlavor),
         annotations: { readOnlyHint: true },
       },
       async ({ workspaceId, ...input }, { _meta, requestId }) => {
@@ -2124,7 +2154,7 @@ export function createMcpServer(
           ),
       },
       outputSchema: shellOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
+      ...toolWidgetDescriptorMeta(config, "shell", widgetHostFlavor),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
     async ({ workspaceId, workingDirectory, ...input }, { _meta, requestId }) => {
@@ -2245,7 +2275,14 @@ export function createMcpServer(
   );
   }
 
-  registerProcessTools(server, config, workspaces, processSessions, cardStore);
+  registerProcessTools(
+    server,
+    config,
+    workspaces,
+    processSessions,
+    cardStore,
+    widgetHostFlavor,
+  );
 
   if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
     registerArtifactTools(server, {
@@ -2383,6 +2420,7 @@ export function createServer(
 
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
+    const widgetHostFlavor = widgetHostFlavorFromUserAgent(req.get("user-agent"));
 
     await new Promise<void>((resolve, reject) => {
       bearerAuth(req, res, (error?: unknown) => {
@@ -2408,6 +2446,7 @@ export function createServer(
       requestId,
       method: req.method,
       stateless: true,
+      widgetHostFlavor,
     });
 
     const transport = new StreamableHTTPServerTransport({
@@ -2421,6 +2460,7 @@ export function createServer(
       cardStore,
       resolveLocalAgentProviders,
       incomingArtifactAdapters,
+      widgetHostFlavor,
     );
     let requestServerClosed = false;
     const closeRequestServer = async () => {
